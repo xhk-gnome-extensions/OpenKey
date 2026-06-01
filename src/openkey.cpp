@@ -6,11 +6,8 @@
 #include <algorithm>
 #include <functional>
 #include <fcntl.h>
-#include <pwd.h>
 #include <sys/ioctl.h>
-#include <sys/socket.h>
 #include <sys/time.h>
-#include <sys/un.h>
 #include <unistd.h>
 #include <utility>
 #include <unordered_set>
@@ -201,22 +198,22 @@ static bool equalsASCIIInsensitive(const std::string &a, const char *b) {
 }
 
 static bool isWineProgram(const std::string &program) {
-    if (program.empty()) {
-        return false;
-    }
-    // Wine/Proton Windows programs often show up as "*.exe" here.
-    if (endsWithASCIIInsensitive(program, ".exe")) {
-        return true;
-    }
-    // Some toolkits report the wine loader instead of the actual exe.
-    static const char *kWineProgramNames[] = {
-        "wine", "wine64", "wine-preloader", "wine64-preloader", "wineserver",
-    };
-    for (const char *name : kWineProgramNames) {
-        if (equalsASCIIInsensitive(program, name)) {
-            return true;
-        }
-    }
+    // if (program.empty()) {
+    //     return false;
+    // }
+    // // Wine/Proton Windows programs often show up as "*.exe" here.
+    // if (endsWithASCIIInsensitive(program, ".exe")) {
+    //     return true;
+    // }
+    // // Some toolkits report the wine loader instead of the actual exe.
+    // static const char *kWineProgramNames[] = {
+    //     "wine", "wine64", "wine-preloader", "wine64-preloader", "wineserver",
+    // };
+    // for (const char *name : kWineProgramNames) {
+    //     if (equalsASCIIInsensitive(program, name)) {
+    //         return true;
+    //     }
+    // }
     return false;
 }
 
@@ -310,6 +307,23 @@ static bool isX11Backend(fcitx::InputContext *ic) {
     return display && display[0];
 }
 
+static bool isWaylandBackend(fcitx::InputContext *ic) {
+    const char *frontend = ic ? ic->frontend() : nullptr;
+    if (frontend && startsWithASCIIInsensitive(frontend, "wayland")) {
+        return true;
+    }
+    const char *waylandDisplay = std::getenv("WAYLAND_DISPLAY");
+    if (waylandDisplay && waylandDisplay[0]) {
+        return !isX11Backend(ic);
+    }
+    const char *sessionType = std::getenv("XDG_SESSION_TYPE");
+    if (sessionType && sessionType[0] &&
+        equalsASCIIInsensitive(sessionType, "wayland")) {
+        return !isX11Backend(ic);
+    }
+    return false;
+}
+
 
 static bool shouldUseDST(fcitx::InputContext *ic, int count) {
     if (!ic) return false;
@@ -317,12 +331,10 @@ static bool shouldUseDST(fcitx::InputContext *ic, int count) {
     // Rule 1: app bị skip thủ công
     if (isBrowserProgram(ic->program())) return false;
 
-    // Rule 3: app phải support surrounding text
-    if (ic->program().empty() &&
-        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
-        // Trường hợp này gần như chỉ xảy ra với Chrome/Chromium trên Wayland
-        return false;
-    }
+    // If we can't identify the program (common on Wayland for some clients),
+    // deleteSurroundingText is often unreliable in web/electron text fields.
+    // Prefer uinput/server backspace in that case.
+    if (ic->program().empty()) return false;
 
     const auto &st = ic->surroundingText();
 
@@ -340,10 +352,7 @@ static bool shouldUseDST(fcitx::InputContext *ic, int count) {
 
 class BackspaceInjector {
 public:
-    ~BackspaceInjector() {
-        destroyServer();
-        destroyUinput();
-    }
+    ~BackspaceInjector() { destroyUinput(); }
 
     enum class Method {
         DeleteSurroundingText,
@@ -357,17 +366,17 @@ public:
         if (count <= 0) {
             return Method::None;
         }
+
+        FCITX_INFO() << "openkey: program=" << ic->program()
+             << " frontend=" << (ic->frontend() ? ic->frontend() : "null")
+             << " display=" << ic->display();
+             
             // Dùng deleteSurroundingText cho app reliable, trừ Chrome
         if (shouldUseDST(ic, count)) {
             ic->deleteSurroundingText(-count, count);
             return Method::DeleteSurroundingText;
         }
 
-        if (ensureServer(debug)) {
-            if (sendBackspacesServer(count, debug)) {
-                return Method::Uinput;
-            }
-        }
         if (ensureUinput(debug)) {
             sendBackspacesUinput(count, uinputInterKeyUsec);
             return Method::Uinput;
@@ -380,99 +389,6 @@ public:
 private:
     int fd_ = -1;
     bool tried_ = false;
-    int serverFd_ = -1;
-
-    void destroyServer() {
-#ifdef __linux__
-        if (serverFd_ >= 0) {
-            ::close(serverFd_);
-        }
-#endif
-        serverFd_ = -1;
-    }
-
-    static std::string buildServerSocketName() {
-        struct passwd pwd {};
-        struct passwd *result = nullptr;
-        long bufSize = sysconf(_SC_GETPW_R_SIZE_MAX);
-        if (bufSize <= 0) {
-            bufSize = 16384;
-        }
-        std::vector<char> buf(static_cast<std::size_t>(bufSize));
-        std::string username;
-        const int res =
-            getpwuid_r(getuid(), &pwd, buf.data(), buf.size(), &result);
-        if (res == 0 && result) {
-            username = result->pw_name;
-        } else {
-            username = "unknown";
-        }
-
-        std::string name;
-        name.reserve(64);
-        name += "openkeysocket-";
-        name += username;
-        name += "-kb_socket";
-        constexpr std::size_t kMax = 100;
-        if (name.size() > kMax) {
-            name.resize(kMax);
-        }
-        return name;
-    }
-
-    bool ensureServer(bool debug) {
-#ifndef __linux__
-        (void)debug;
-        return false;
-#else
-        (void)debug;
-        if (serverFd_ >= 0) {
-            return true;
-        }
-
-        const int fd = ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK, 0);
-        if (fd < 0) {
-            return false;
-        }
-
-        const std::string socketName = buildServerSocketName();
-        struct sockaddr_un addr {};
-        addr.sun_family = AF_UNIX;
-        addr.sun_path[0] = '\0';
-        std::memcpy(&addr.sun_path[1], socketName.data(), socketName.size());
-        const socklen_t len = static_cast<socklen_t>(
-            offsetof(struct sockaddr_un, sun_path) + socketName.size() + 1);
-        if (::connect(fd, reinterpret_cast<struct sockaddr *>(&addr), len) !=
-            0) {
-            ::close(fd);
-            return false;
-        }
-        serverFd_ = fd;
-        return true;
-#endif
-    }
-
-    bool sendBackspacesServer(int count, bool debug) {
-#ifndef __linux__
-        (void)count;
-        (void)debug;
-        return false;
-#else
-        if (serverFd_ < 0) {
-            return false;
-        }
-        const ssize_t n =
-            ::send(serverFd_, &count, sizeof(count), MSG_NOSIGNAL);
-        if (n == static_cast<ssize_t>(sizeof(count))) {
-            return true;
-        }
-        if (debug) {
-            FCITX_WARN() << "openkey: uinput-server send failed; reconnect";
-        }
-        destroyServer();
-        return false;
-#endif
-    }
 
     void destroyUinput() {
 #ifdef __linux__
@@ -1193,6 +1109,14 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s) 
         return RuntimeMode::Preedit;
     }
 
+    // Wayland: some clients (notably browsers/electron using compositor input
+    // method protocol) may not provide program name at all, and non-preedit
+    // modes are often fragile. Treat program-less Wayland clients as "browser
+    // like" and force preedit.
+    if (isWaylandBackend(ic) && s.program.empty()) {
+        return RuntimeMode::Preedit;
+    }
+
     // Wine/Proton clients are very sensitive to surrounding-text/backspace
     // rewriting. Force preedit unconditionally for these applications.
     if (isWineProgram(s.program)) {
@@ -1220,39 +1144,30 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s) 
         return true;
     };
 
-    const bool clientPreeditSupported =
-        ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit);
-    const bool backspaceRewriteSupported =
-        g_backspaceInjector.uinputAvailable(debugEnabled());
-
     // Explicit overrides.
     switch (config_.mode.value()) {
     case ModeOverride::DirectCommit:
         return RuntimeMode::DirectCommit;
     case ModeOverride::ForceSurroundingText:
-        // If forced surrounding-text can't be used, fallback to preedit.
-        return canUseSurroundingText() ? RuntimeMode::SurroundingText
-                                       : RuntimeMode::Preedit;
+        // If forced surrounding-text can't be used, fallback to backspace
+        // rewrite; otherwise fallback to preedit.
+        if (canUseSurroundingText()) {
+            return RuntimeMode::SurroundingText;
+        }
+        return RuntimeMode::BackspaceRewriteDelta;
     case ModeOverride::ForcePreedit:
         return RuntimeMode::Preedit;
     case ModeOverride::ForceBackspaceRewriteDelta:
-        return backspaceRewriteSupported ? RuntimeMode::BackspaceRewriteDelta
-                                        : RuntimeMode::Preedit;
+        return RuntimeMode::BackspaceRewriteDelta;
     case ModeOverride::Auto:
         break;
     }
 
-    // Auto mode priority: SurroundingText -> BackspaceRewrite -> Preedit -> DirectCommit.
+    // Auto mode: SurroundingText -> BackspaceRewrite.
     if (canUseSurroundingText()) {
         return RuntimeMode::SurroundingText;
     }
-    if (backspaceRewriteSupported) {
-        return RuntimeMode::BackspaceRewriteDelta;
-    }
-    if (clientPreeditSupported) {
-        return RuntimeMode::Preedit;
-    }
-    return RuntimeMode::DirectCommit;
+    return RuntimeMode::BackspaceRewriteDelta;
 }
 
 void OpenKeyEngine::addProgramToBlacklist(const std::string &program) {
@@ -1699,9 +1614,16 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
 
     const auto key = event.key().normalize();
 
-    // Hard force: X11 browser text fields are fragile with non-preedit modes.
-    // Even if user sets ForceBackspaceRewriteDelta, keep preedit for browsers.
-    if (isX11Backend(ic) && isBrowserProgram(state->program)) {
+    FCITX_INFO() << "openkey: program=" << ic->program()
+             << " frontend=" << (ic->frontend() ? ic->frontend() : "null")
+             << " display=" << ic->display();
+
+    // Hard force: browser-like text fields are fragile with non-preedit modes.
+    // Even if user sets ForceBackspaceRewriteDelta, keep preedit.
+    const bool forcePreeditForBrowserLike =
+        (isX11Backend(ic) && isBrowserProgram(state->program)) ||
+        (isWaylandBackend(ic) && state->program.empty());
+    if (forcePreeditForBrowserLike) {
         const RuntimeMode desired =
             ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)
                 ? RuntimeMode::DirectCommit
@@ -1731,7 +1653,7 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
             state->autoMode = desired;
             updatePreeditUI(ic, *state);
             if (debugEnabled()) {
-                FCITX_INFO() << "openkey: force preedit for x11 browser program="
+                FCITX_INFO() << "openkey: force preedit for browser-like program="
                              << state->program
                              << " mode=" << static_cast<int>(state->mode);
             }
@@ -1843,15 +1765,11 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
             state->manualMode = true;
             if (canUseSurroundingText()) {
                 state->mode = RuntimeMode::SurroundingText;
-            } else if (g_backspaceInjector.uinputAvailable(debugEnabled())) {
-                state->mode = RuntimeMode::BackspaceRewriteDelta;
             } else {
-                state->mode = RuntimeMode::Preedit;
+                state->mode = RuntimeMode::BackspaceRewriteDelta;
             }
         } else if (state->mode == RuntimeMode::SurroundingText) {
-            state->mode = g_backspaceInjector.uinputAvailable(debugEnabled())
-                              ? RuntimeMode::BackspaceRewriteDelta
-                              : RuntimeMode::Preedit;
+            state->mode = RuntimeMode::BackspaceRewriteDelta;
         } else if (state->mode == RuntimeMode::BackspaceRewriteDelta) {
             state->mode = RuntimeMode::Preedit;
         } else if (state->mode == RuntimeMode::Preedit) {
@@ -1993,20 +1911,29 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         adapter_->setCodeTable(state->codeTable);
         handled = handleSurroundingText(ic, event, *state);
         if (!handled) {
-            // If surrounding text is flaky for this app, fallback to preedit.
+            // If surrounding text is flaky for this app, blacklist it and
+            // fallback to backspace rewrite (uinput). If that fails, fallback
+            // to preedit as a last resort.
             // Heuristic: repeated failures to use surrounding text.
             if (state->surroundingFailures >= 3) {
                 if (debugEnabled()) {
-                    FCITX_INFO() << "openkey: fallback to preedit program="
+                    FCITX_INFO() << "openkey: fallback to backspace program="
                                  << state->program
                                  << " reason=surrounding_failures";
                 }
                 addProgramToBlacklist(state->program);
-                state->mode = RuntimeMode::Preedit;
-                // Re-handle this key in preedit mode immediately so the key
+                state->mode = RuntimeMode::BackspaceRewriteDelta;
+                // Re-handle this key in backspace mode immediately so the key
                 // doesn't leak to application as raw ASCII when we fallback.
-                adapter_->setCodeTable(state->codeTable);
-                (void)handlePreedit(ic, event, *state);
+                if (backspaceRewriteHandler_) {
+                    (void)backspaceRewriteHandler_->handleKey(ic, event, *state);
+                }
+                if (!event.accepted()) {
+                    // Last resort.
+                    state->mode = RuntimeMode::Preedit;
+                    adapter_->setCodeTable(state->codeTable);
+                    (void)handlePreedit(ic, event, *state);
+                }
             }
         }
         return;

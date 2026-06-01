@@ -106,25 +106,4 @@ if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
 
-if(UNIX AND NOT APPLE)
-    add_executable(openkey-uinput-server
-        src/openkey_uinput_server.cpp
-    )
-    target_compile_features(openkey-uinput-server PRIVATE cxx_std_17)
-    install(TARGETS openkey-uinput-server DESTINATION "${CMAKE_INSTALL_BINDIR}")
-
-    # Optional auto-start via systemd (system service template).
-    # We install to /etc/systemd/system by default; packagers can override via
-    # -DSYSTEMD_SYSTEM_UNIT_DIR=...
-    set(SYSTEMD_SYSTEM_UNIT_DIR "/etc/systemd/system"
-        CACHE PATH "Systemd system unit install dir")
-    configure_file(
-        "${CMAKE_CURRENT_SOURCE_DIR}/systemd/openkey-uinput-server@.service"
-        "${CMAKE_CURRENT_BINARY_DIR}/openkey-uinput-server@.service"
-        @ONLY
-    )
-    install(
-        FILES "${CMAKE_CURRENT_BINARY_DIR}/openkey-uinput-server@.service"
-        DESTINATION "${SYSTEMD_SYSTEM_UNIT_DIR}"
-    )
-endif()
+## openkey-uinput-server removed: we inject /dev/uinput directly from the addon.
