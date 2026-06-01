@@ -366,10 +366,6 @@ public:
         if (count <= 0) {
             return Method::None;
         }
-
-        FCITX_INFO() << "openkey: program=" << ic->program()
-             << " frontend=" << (ic->frontend() ? ic->frontend() : "null")
-             << " display=" << ic->display();
              
             // Dùng deleteSurroundingText cho app reliable, trừ Chrome
         if (shouldUseDST(ic, count)) {
@@ -1613,10 +1609,6 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     }
 
     const auto key = event.key().normalize();
-
-    FCITX_INFO() << "openkey: program=" << ic->program()
-             << " frontend=" << (ic->frontend() ? ic->frontend() : "null")
-             << " display=" << ic->display();
 
     // Hard force: browser-like text fields are fragile with non-preedit modes.
     // Even if user sets ForceBackspaceRewriteDelta, keep preedit.
