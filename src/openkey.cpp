@@ -399,48 +399,52 @@ private:
 
     bool ensureUinput(bool debug) {
 #ifndef __linux__
-        (void)debug;
-        return false;
+    (void)debug;
+    return false;
 #else
-        if (fd_ >= 0) {
-            return true;
-        }
-        if (tried_) {
-            return false;
-        }
-        tried_ = true;
-
-        fd_ = ::open("/dev/uinput", O_WRONLY | O_NONBLOCK);
-        if (fd_ < 0) {
-            if (debug) {
-                FCITX_WARN() << "openkey: uinput unavailable";
-            }
-            return false;
-        }
-
-        (void)ioctl(fd_, UI_SET_EVBIT, EV_KEY);
-        (void)ioctl(fd_, UI_SET_KEYBIT, KEY_BACKSPACE);
-
-        struct uinput_user_dev uidev {};
-        std::snprintf(uidev.name, sizeof(uidev.name), "fcitx5-openkey");
-        uidev.id.bustype = BUS_USB;
-        uidev.id.vendor = 0x1234;
-        uidev.id.product = 0x5678;
-        uidev.id.version = 1;
-        const ssize_t w = ::write(fd_, &uidev, sizeof(uidev));
-        (void)w;
-
-        if (ioctl(fd_, UI_DEV_CREATE) < 0) {
-            ::close(fd_);
-            fd_ = -1;
-            if (debug) {
-                FCITX_WARN() << "openkey: UI_DEV_CREATE failed";
-            }
-            return false;
-        }
+    if (fd_ >= 0) {
         return true;
-#endif
     }
+    if (tried_) {
+        return false;
+    }
+    tried_ = true;
+
+    fd_ = ::open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (fd_ < 0) {
+        if (debug) {
+            FCITX_WARN() << "openkey: uinput unavailable";
+        }
+        return false;
+    }
+
+    (void)ioctl(fd_, UI_SET_EVBIT, EV_KEY);
+    (void)ioctl(fd_, UI_SET_KEYBIT, KEY_BACKSPACE);
+
+    struct uinput_user_dev uidev {};
+    std::snprintf(uidev.name, sizeof(uidev.name), "fcitx5-openkey");
+    uidev.id.bustype = BUS_USB;
+    uidev.id.vendor = 0x1234;
+    uidev.id.product = 0x5678;
+    uidev.id.version = 1;
+    const ssize_t w = ::write(fd_, &uidev, sizeof(uidev));
+    (void)w;
+
+    if (ioctl(fd_, UI_DEV_CREATE) < 0) {
+        ::close(fd_);
+        fd_ = -1;
+        if (debug) {
+            FCITX_WARN() << "openkey: UI_DEV_CREATE failed";
+        }
+        return false;
+    }
+
+    // Đợi kernel register virtual device xong trước khi dùng
+    ::usleep(200000); // 200ms
+
+    return true;
+#endif
+}
 
 #ifdef __linux__
     static void emitEvent(int fd, int type, int code, int value) {
@@ -893,6 +897,9 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     backspaceRewriteHandler_ =
         std::make_unique<BackspaceRewriteModeHandler>(std::move(deps));
     reloadConfig();
+
+    // Warm up uinput ngay khi load để tránh delay lần đầu gõ
+    g_backspaceInjector.uinputAvailable(debugEnabled());
 }
 
 OpenKeyEngine::~OpenKeyEngine() {
