@@ -269,7 +269,8 @@ static bool isBrowserProgram(const std::string &program) {
         "nyxt",
         "otter",
         "dooble",
-        "messenger"
+        "messenger",
+        "helium"
     };
 
     for (const auto &pattern : kBrowserPatterns) {
