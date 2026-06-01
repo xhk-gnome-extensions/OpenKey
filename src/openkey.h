@@ -64,6 +64,14 @@ FCITX_CONFIGURATION(OpenKeyConfig,
                                       fcitx::KeyListConstrain(
                                           fcitx::KeyConstrainFlag::
                                               AllowModifierLess)};
+                    fcitx::KeyListOption
+                        toggleBackspaceUinputKey{this,
+                                                 "ToggleBackspaceUinputKey",
+                                                 N_("Toggle uinput backspace for current app"),
+                                                 {fcitx::Key("Alt+Super+BackSpace")},
+                                                 fcitx::KeyListConstrain(
+                                                     fcitx::KeyConstrainFlag::
+                                                         AllowModifierLess)};
                     fcitx::OptionWithAnnotation<ModeOverride,
                                                 ModeOverrideI18NAnnotation>
                         mode{this,
@@ -185,6 +193,11 @@ FCITX_CONFIGURATION(OpenKeyConfig,
                               N_("Debug Logging"),
                               false};
                     fcitx::Option<std::string>
+                        backspacePreferUinputApps{this,
+                                                  "BackspacePreferUinputApps",
+                                                  N_("Prefer uinput backspace for apps"),
+                                                  ""};
+                    fcitx::Option<std::string>
                         surroundingTextBlacklist{this,
                                                  "SurroundingTextBlacklist",
                                                  N_("Surrounding Text "
@@ -202,6 +215,9 @@ struct OpenKeyState : public fcitx::InputContextProperty {
     // Backspace-rewrite mode state.
     std::string shownText;
     bool hasRewrittenCurrentWord = false;
+    // If true, avoid deleteSurroundingText and prefer uinput backspace injection
+    // for this input context (manual override per app).
+    bool preferUinputBackspace = false;
     bool rewriteLock = false;
     bool waitingBackspaceAck = false;
     int expectedBackspaces = 0;
@@ -266,6 +282,9 @@ private:
     std::unordered_set<std::string> surroundingBlacklist_;
     bool blacklistDirty_ = false;
 
+    std::unordered_set<std::string> backspacePreferUinputApps_;
+    bool backspacePreferUinputDirty_ = false;
+
     fcitx::SimpleInputContextPropertyFactory<OpenKeyState> factory_;
 
     // Core adapter.
@@ -279,9 +298,11 @@ private:
 
     bool debugEnabled() const;
     void rebuildBlacklist();
+    void rebuildBackspacePreferUinputApps();
     void applyConfig();
     void persistConfig();
     void addProgramToBlacklist(const std::string &program);
+    void toggleProgramPreferUinput(const std::string &program);
 
     OpenKeyState *stateFor(fcitx::InputContext *ic);
 

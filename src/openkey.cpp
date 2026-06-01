@@ -790,11 +790,11 @@ public:
                 }
             };
 
-auto applyWordDelta = [&, this](const std::string &newWord,
-                                const char *reason) -> bool {
-    if (!deps_.backspaceInjector) {
-        return false;
-    }
+	auto applyWordDelta = [&, this](const std::string &newWord,
+	                                const char *reason) -> bool {
+	    if (!deps_.backspaceInjector) {
+	        return false;
+	    }
     if (!fcitx::utf8::validate(state.shownText) ||
         !fcitx::utf8::validate(newWord)) {
         clearWordState();
@@ -828,12 +828,14 @@ auto applyWordDelta = [&, this](const std::string &newWord,
         state.hasRewrittenCurrentWord = !state.shownText.empty();
         event.filterAndAccept();
         return true;
-    }
-
-    // Thử DeleteSurroundingText trước (GTK, Qt app reliable)
-    const auto method = deps_.backspaceInjector->sendBackspaces(
-        ic, state.program, static_cast<int>(deleteCount), debug,
-        uinputInterKeyUsec);
+	    }
+	
+	    // Thử DeleteSurroundingText trước (GTK, Qt app reliable)
+	    const std::string programForInjector =
+	        state.preferUinputBackspace ? std::string() : state.program;
+	    const auto method = deps_.backspaceInjector->sendBackspaces(
+	        ic, programForInjector, static_cast<int>(deleteCount), debug,
+	        uinputInterKeyUsec);
 
     if (method == BackspaceInjector::Method::DeleteSurroundingText) {
         // Không cần chờ ack, commit ngay
@@ -846,11 +848,11 @@ auto applyWordDelta = [&, this](const std::string &newWord,
         return true;
     }
 
-    if (method == BackspaceInjector::Method::Uinput) {
-        // Inject thêm 1 backspace extra làm trigger ack
-        // (N backspace xóa text + 1 backspace loop back báo xong)
-        deps_.backspaceInjector->sendBackspaces(
-            ic, state.program, 1, debug, uinputInterKeyUsec);
+	    if (method == BackspaceInjector::Method::Uinput) {
+	        // Inject thêm 1 backspace extra làm trigger ack
+	        // (N backspace xóa text + 1 backspace loop back báo xong)
+	        deps_.backspaceInjector->sendBackspaces(
+	            ic, programForInjector, 1, debug, uinputInterKeyUsec);
 
         state.rewriteLock = true;
         state.waitingBackspaceAck = true;
@@ -909,19 +911,21 @@ auto applyWordDelta = [&, this](const std::string &newWord,
             return false;
         }
 
-        // Physical BackSpace: delete one visible rune.
-        if (key.check(FcitxKey_BackSpace)) {
-            if (state.shownText.empty()) {
-                return false;
-            }
-            const auto method = deps_.backspaceInjector->sendBackspaces(
-                ic, state.program, 1, debug, uinputInterKeyUsec);
-            if (method != BackspaceInjector::Method::Uinput) {
-                clearWordState();
-                return false;
-            }
-            event.filterAndAccept();
-            state.shownText = utf8DropLastN(state.shownText, 1);
+	        // Physical BackSpace: delete one visible rune.
+	        if (key.check(FcitxKey_BackSpace)) {
+	            if (state.shownText.empty()) {
+	                return false;
+	            }
+	            const std::string programForInjector =
+	                state.preferUinputBackspace ? std::string() : state.program;
+	            const auto method = deps_.backspaceInjector->sendBackspaces(
+	                ic, programForInjector, 1, debug, uinputInterKeyUsec);
+	            if (method != BackspaceInjector::Method::Uinput) {
+	                clearWordState();
+	                return false;
+	            }
+	            event.filterAndAccept();
+	            state.shownText = utf8DropLastN(state.shownText, 1);
             state.hasRewrittenCurrentWord = !state.shownText.empty();
             return true;
         }
@@ -939,17 +943,17 @@ auto applyWordDelta = [&, this](const std::string &newWord,
                 return false;
             }
 
-            // Word characters: apply OpenKey changes immediately via delta.
-            if (isComposingASCII(c)) {
-                if (!adapterShared) {
-                    return false;
-                }
-                adapterShared->setCodeTable(state.codeTable);
-                const auto r =
-                    adapterShared->processAsciiKey(state.shownText, c);
-                if (!r.handled) {
-                    return false;
-                }
+	        // Word characters: apply OpenKey changes immediately via delta.
+	        if (isComposingASCII(c)) {
+	            if (!adapterShared) {
+	                return false;
+	            }
+                    adapterShared->setCodeTable(state.codeTable);
+	            const auto r =
+	                adapterShared->processAsciiKey(state.shownText, c);
+	            if (!r.handled) {
+	                return false;
+	            }
                 state.lastPhysicalKeyUsec = nowUsec;
                 return applyWordDelta(r.newWord, "ascii");
             }
@@ -1089,6 +1093,18 @@ void OpenKeyEngine::rebuildBlacklist() {
     }
 }
 
+void OpenKeyEngine::rebuildBackspacePreferUinputApps() {
+    backspacePreferUinputApps_.clear();
+    for (auto &part : fcitx::stringutils::split(
+             config_.backspacePreferUinputApps.value(), ",",
+             fcitx::stringutils::SplitBehavior::SkipEmpty)) {
+        auto s = fcitx::stringutils::trim(part);
+        if (!s.empty()) {
+            backspacePreferUinputApps_.insert(std::move(s));
+        }
+    }
+}
+
 OpenKeyState *OpenKeyEngine::stateFor(fcitx::InputContext *ic) {
     return ic->propertyFor(&factory_);
 }
@@ -1108,6 +1124,7 @@ void OpenKeyEngine::reloadConfig() {
 
 void OpenKeyEngine::applyConfig() {
     rebuildBlacklist();
+    rebuildBackspacePreferUinputApps();
     adapter_->setInputType(toOpenKeyInputType(config_.inputType.value()));
     adapter_->setFreeMark(config_.freeMark.value());
     adapter_->setCodeTable(toOpenKeyCodeTable(config_.codeTable.value()));
@@ -1138,6 +1155,7 @@ void OpenKeyEngine::applyConfig() {
 
 void OpenKeyEngine::persistConfig() {
     blacklistDirty_ = false;
+    backspacePreferUinputDirty_ = false;
     fcitx::safeSaveAsIni(config_, fcitx::StandardPath::Type::PkgConfig,
                          "conf/openkey.conf");
 }
@@ -1178,6 +1196,10 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
             }
         }
     }
+    state->preferUinputBackspace =
+        (!state->program.empty() &&
+         backspacePreferUinputApps_.find(state->program) !=
+             backspacePreferUinputApps_.end());
 
     state->codeTable = toOpenKeyCodeTable(config_.codeTable.value());
 
@@ -1294,6 +1316,30 @@ void OpenKeyEngine::addProgramToBlacklist(const std::string &program) {
     merged += program;
     config_.surroundingTextBlacklist.setValue(std::move(merged));
     blacklistDirty_ = true;
+    persistConfig();
+}
+
+void OpenKeyEngine::toggleProgramPreferUinput(const std::string &program) {
+    if (program.empty()) {
+        return;
+    }
+
+    const auto it = backspacePreferUinputApps_.find(program);
+    if (it != backspacePreferUinputApps_.end()) {
+        backspacePreferUinputApps_.erase(it);
+    } else {
+        backspacePreferUinputApps_.insert(program);
+    }
+
+    std::vector<std::string> apps;
+    apps.reserve(backspacePreferUinputApps_.size());
+    for (const auto &s : backspacePreferUinputApps_) {
+        apps.push_back(s);
+    }
+    std::sort(apps.begin(), apps.end());
+    config_.backspacePreferUinputApps.setValue(
+        fcitx::stringutils::join(apps, ","));
+    backspacePreferUinputDirty_ = true;
     persistConfig();
 }
 
@@ -1725,6 +1771,10 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                 }
             }
         }
+        state->preferUinputBackspace =
+            (!state->program.empty() &&
+             backspacePreferUinputApps_.find(state->program) !=
+                 backspacePreferUinputApps_.end());
     }
 
     if (event.isRelease()) {
@@ -1732,6 +1782,137 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     }
 
     const auto key = event.key().normalize();
+
+    // Toggle delete method in BackspaceRewriteDelta: prefer uinput for current app.
+    if (key.checkKeyList(config_.toggleBackspaceUinputKey.value()) &&
+        key.sym() != FcitxKey_None) {
+        std::string program = state->program;
+        if (program.empty()) {
+            program = ic->program();
+        }
+        if (program.empty() && focusedAppBridge_) {
+            const std::string bridged = focusedAppBridge_->focusedAppId();
+            if (!bridged.empty()) {
+                program = bridged;
+            }
+        }
+
+        if (!program.empty()) {
+            toggleProgramPreferUinput(program);
+            state->program = program;
+            state->preferUinputBackspace =
+                (backspacePreferUinputApps_.find(program) !=
+                 backspacePreferUinputApps_.end());
+
+            state->shownText.clear();
+            state->hasRewrittenCurrentWord = false;
+            state->rewriteLock = false;
+            state->waitingBackspaceAck = false;
+            state->expectedBackspaces = 0;
+            state->seenBackspaces = 0;
+            state->pendingKeys.clear();
+            state->rewriteTimer.reset();
+            state->commitTimer.reset();
+            state->pendingConvertedText.clear();
+            state->pendingShownTextAfterCommit.clear();
+            state->hasPendingBoundaryKey = false;
+            state->composing.clear();
+            state->macroBuffer.clear();
+            state->rollbackWord.clear();
+            state->rollbackDisplay.clear();
+            state->noSeedNextWord = false;
+            state->surroundingFailures = 0;
+            updatePreeditUI(ic, *state);
+
+            const std::string toast =
+                std::string("OpenKey delete: ") +
+                (state->preferUinputBackspace ? "Uinput" : "DST");
+
+            fcitx::Text aux;
+            aux.append(toast);
+            ic->inputPanel().setAuxUp(aux);
+            ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel,
+                                    true);
+
+            state->modeInfoTimer.reset();
+            const auto icRef = ic->watch();
+            const std::weak_ptr<void> lifetimeWeak = lifetime_;
+            const uint64_t deadline =
+                fcitx::now(CLOCK_MONOTONIC) + 800000; // 800ms
+            if (instance_) {
+                state->modeInfoTimer = instance_->eventLoop().addTimeEvent(
+                    CLOCK_MONOTONIC, deadline, 0,
+                    [this, icRef, lifetimeWeak, toast](fcitx::EventSourceTime *,
+                                                      uint64_t) {
+                        if (lifetimeWeak.expired()) {
+                            return false;
+                        }
+                        auto *ic2 = icRef.get();
+                        if (!ic2) {
+                            return false;
+                        }
+                        auto *st = stateFor(ic2);
+                        if (!st) {
+                            return false;
+                        }
+                        auto _timer = std::move(st->modeInfoTimer);
+
+                        const auto &current =
+                            ic2->inputPanel().auxUp().toString();
+                        if (current == toast) {
+                            ic2->inputPanel().setAuxUp(fcitx::Text());
+                            ic2->updateUserInterface(
+                                fcitx::UserInterfaceComponent::InputPanel, true);
+                        }
+                        return false;
+                    });
+            }
+        } else {
+            const std::string toast = "OpenKey delete: unknown app";
+            fcitx::Text aux;
+            aux.append(toast);
+            ic->inputPanel().setAuxUp(aux);
+            ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel,
+                                    true);
+
+            state->modeInfoTimer.reset();
+            const auto icRef = ic->watch();
+            const std::weak_ptr<void> lifetimeWeak = lifetime_;
+            const uint64_t deadline =
+                fcitx::now(CLOCK_MONOTONIC) + 800000; // 800ms
+            if (instance_) {
+                state->modeInfoTimer = instance_->eventLoop().addTimeEvent(
+                    CLOCK_MONOTONIC, deadline, 0,
+                    [this, icRef, lifetimeWeak, toast](fcitx::EventSourceTime *,
+                                                      uint64_t) {
+                        if (lifetimeWeak.expired()) {
+                            return false;
+                        }
+                        auto *ic2 = icRef.get();
+                        if (!ic2) {
+                            return false;
+                        }
+                        auto *st = stateFor(ic2);
+                        if (!st) {
+                            return false;
+                        }
+                        auto _timer = std::move(st->modeInfoTimer);
+
+                        const auto &current =
+                            ic2->inputPanel().auxUp().toString();
+                        if (current == toast) {
+                            ic2->inputPanel().setAuxUp(fcitx::Text());
+                            ic2->updateUserInterface(
+                                fcitx::UserInterfaceComponent::InputPanel, true);
+                        }
+                        return false;
+                    });
+            }
+        }
+
+        event.filterAndAccept();
+        return;
+    }
 
     // Hard force: browser-like text fields are fragile with non-preedit modes.
     // Even if user sets ForceBackspaceRewriteDelta, keep preedit.
