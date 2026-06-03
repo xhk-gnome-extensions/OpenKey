@@ -1,105 +1,344 @@
+# OpenKey cho Linux
 
-# [OpenKey](http://open-key.org)
-### [Download bản mới nhất](https://github.com/tuyenvm/OpenKey/releases)
-[![GitHub release](https://img.shields.io/github/v/release/tuyenvm/OpenKey.svg)](https://github.com/tuyenvm/OpenKey/releases/latest)
+OpenKey trong repo này là addon gõ tiếng Việt cho `fcitx5` trên Linux.  
+Phần xử lý tiếng Việt dùng lại core ở `Sources/OpenKey/engine`, còn phần Linux được build thành addon `openkey.so` để `fcitx5` nạp vào.
 
-### Open source Vietnamese Input App for macOS - Bộ gõ tiếng Việt nguồn mở cho macOS.
-Bộ gõ tiếng Việt mới cho macOS, sử dụng kỹ thuật `Backspace`. Loại bỏ lỗi gạch chân khó chịu ở bộ gõ mặc định. Hoàn toàn miễn phí và là nguồn mở, luôn cập nhật và phát triển.
+README này chỉ ghi cho bản Linux, tập trung vào:
 
-### Mã nguồn của ứng dụng được mở công khai, minh bạch dưới giấy phép GPL. Điều này nghĩa là bạn hoàn toàn có thể tải mã nguồn về tự build, cải tiến theo mục đích của bạn. Nếu bạn tái phân phối bản cải tiến của bạn, thì nó cũng phải là mã nguồn mở và thông báo bản gốc là OpenKey.
+- cơ chế hoạt động
+- cách cài
+- dependencies cần có
+- lỗi thường gặp khi cài xong nhưng không gõ được
 
-### Lưu ý, khi sử dụng OpenKey, bạn nên tắt hẳn bộ gõ khác vì 2 chương trình bộ gõ sẽ xung đột nhau, dẫn đến thao tác không chính xác.
+## OpenKey Linux hoạt động như thế nào
 
-![Giao diện](https://raw.githubusercontent.com/tuyenvm/tuyenvm.github.io/master/images/openkey-main-control.png "Main UI")
-![Giao diện](https://raw.githubusercontent.com/tuyenvm/tuyenvm.github.io/master/images/openkey-main-control-2.png "Main UI")
-![Giao diện](https://raw.githubusercontent.com/tuyenvm/tuyenvm.github.io/master/images/openkey-main-control-3.png "Main UI")
-![Menu](https://raw.githubusercontent.com/tuyenvm/tuyenvm.github.io/master/images/openkey-small-control.png "Menu bar")
-![Gõ tắt](https://raw.githubusercontent.com/tuyenvm/tuyenvm.github.io/master/images/openkey-macro.png "Macro")
-![Chuyển mã](https://raw.githubusercontent.com/tuyenvm/tuyenvm.github.io/master/images/openkey-convert-tool.png "ConvertTool")
+OpenKey Linux không chạy như một app riêng. Nó hoạt động theo mô hình:
 
-## Hỗ trợ kiểu gõ
-- Telex
-- VNI
-- Simple Telex
+1. `fcitx5` nhận phím bạn gõ.
+2. Addon `openkey.so` chuyển chuỗi phím ASCII sang core OpenKey.
+3. Core OpenKey xử lý Telex/VNI/Simple Telex, kiểm tra dấu, chính tả, bảng mã.
+4. Kết quả được trả lại ứng dụng theo một trong các cách sau:
 
-## Bảng mã thông dụng:
-- Unicode (Unicode dựng sẵn).
-- TCVN3 (ABC).
-- VNI Windows.
-- Unicode Compound (Unicode tổ hợp).
-- Vietnamese Locale CP 1258.
-- ...
+- `surrounding text`: sửa trực tiếp từ đang gõ nếu ứng dụng hỗ trợ tốt
+- `preedit`: hiện vùng gõ tạm, phù hợp hơn với browser/Electron
+- `backspace + rewrite`: fallback khi app không hỗ trợ `surrounding text` ổn định
+- `uinput`: bơm phím backspace qua `/dev/uinput` khi cần
 
-## Tính năng:
-- **Modern orthography** (On/Off) - Đặt dấu oà, uý thay vì òa, úy.
-- **Quick Telex** (On/Off) - Gõ nhanh (cc=ch, gg=gi, kk=kh, nn=ng, qq=qu, pp=ph, tt=th).
-- **Grammar check** (On/Off) - Kiểm tra ngữ pháp.
-- **Spelling check** (On/Off) - Kiểm tra chính tả.
-- **Restore key if invalid word** (on/off) - Phục hồi phím với từ sai.
-- **Run on startup** (On/Off) - Chạy cùng macOS.
-- **Gray menu bar icon** (On/Off) - Biểu tượng xám trên thanh menu phù hợp với chế độ Dark mode.
-- **Switch input mode by shortcut key** - Đổi chế độ gõ bằng phím tắt tùy chọn.
-- **Autocorrect fixed** (On/Off) - Sửa lỗi autocorrect trên trình duyệt như Chrome, Safari, Firefox, Microsoft Excel.
-- **Underline issue fixed on macOS** (On/Off) - Sửa lỗi gạch chân trên macOS.
-- **Tạm tắt kiểm tra chính tả bằng phím Ctrl** (On/Off) (Bản 1.5 về sau).
-- **Tạm tắt OpenKey bằng phím Cmd/Alt** (On/Off) (Bản 2.0.1 về sau).
-- **Cho phép dùng f z w j làm phụ âm đầu** (On/Off) (Bản 1.5 về sau).
-- **Gõ tắt phụ âm đầu: f->ph, j->gi, w->qu** (On/Off) (Bản 1.6 về sau).
-- **Gõ tắt phụ âm cuối: g->ng, h->nh, k->ch** (On/Off) (Bản 1.6 về sau).
-- **Hiện biểu tượng trên thanh Dock** (On/Off) (Bản 2.0.1 về sau). Bấm vào icon trên thanh Dock sẽ mở nhanh Bảng điều khiển.
-- **Macro** - Tính năng gõ tắt vô cùng tiện lợi. Gõ tắt của macOS chỉ hỗ trợ 20 ký tự, còn OpenKey không giới hạn ký tự.
-- **Chuyển chế độ thông minh:** (On/Off) (Bản 1.2 về sau) - Bạn đang dùng chế độ gõ Tiếng Việt trên ứng dụng A, bạn chuyển qua ứng dụng B trước đó bạn dùng chế độ gõ Tiếng Anh, OpenKey sẽ tự động chuyển qua chế độ gõ Tiếng Anh cho bạn, khi bạn quay lại ứng dụng A, OpenKey tất nhiên sẽ chuyển lại chế độ gõ tiếng Việt, rất cơ động.
-- **Viết Hoa chữ cái đầu câu** (On/Off) (Bản 1.2 về sau) - Khi gõ văn bản dài, đôi khi bạn quên ghi hoa chữ cái đầu câu khi kết thúc một câu hoặc khi xuống hàng, tính năng này sẽ tự ghi hoa chữ cái đầu câu cho bạn, thật tuyệt vời.
-- **Chế độ “Gửi từng phím”:** (On/Off) (Bản 1.1 về sau) mặc định dùng kỹ thuật mới gửi dữ liệu 1 lần thay vì gửi nhiều lần cho chuỗi ký tự, nên nếu có ứng dụng nào không tương thích, hãy bật tính năng này lên, mặc định thì nên tắt vì kỹ thuật mới sẽ chạy nhanh hơn.
-- **Cập nhật tự động:** (Bản 1.3 về sau) tính năng hỗ trợ cập nhật phiên bản OpenKey mới nhất mỗi khi mở OpenKey hoặc tự check trong phần mục Giới thiệu.
-- **Công cụ chuyển mã:** (Bản 1.4 về sau) hỗ trợ chuyển mã qua lại văn bản, thích hợp cho việc chuyển đổi văn bản cũ viết bằng VNI, TCVN3 qua Unicode,... Hỗ trợ cấu hình phím tắt chuyển mã nhanh, bảng cấu hình tùy chọn chuyển mã.
-- **Tự ghi nhớ bảng mã theo ứng dụng:** (Bản 2.0.1 về sau) Phù hợp cho các bạn dùng Photoshop, CAD,... với các bảng mã VNI, TCVN3. OpenKey tự ghi nhớ ứng dụng nào dùng bảng mã nào để lần sau sử dụng Photoshop, CAD,... OpenKey có thể tự chuyển sang bảng mã đó.
-- ...
+Vì vậy nếu "cài xong nhưng không gõ được", nguyên nhân thường không nằm ở core OpenKey mà nằm ở một trong các lớp sau:
 
+- `fcitx5` chưa chạy đúng
+- môi trường input method chưa trỏ sang `fcitx5`
+- frontend GTK/Qt chưa có
+- addon chưa được add vào `fcitx5`
+- `/dev/uinput` chưa có hoặc không đủ quyền
+- ứng dụng hiện tại không hợp với mode đang dùng
 
-[Changelog](https://github.com/tuyenvm/OpenKey/blob/master/CHANGELOG.md)
+## Tính năng chính
 
-## Cài đặt:
-**Cài đặt thủ công:**  
-Tải bản OpenKey mới nhất từ [đây](https://github.com/tuyenvm/OpenKey/releases/latest), mở file `dmg` ra rồi kéo thả `OpenKey.app` vào thư mục `Application`.
+- Kiểu gõ `Telex`, `VNI`, `Simple Telex`
+- Bảng mã `Unicode`, `TCVN3`, `VNI Windows`
+- Kiểm tra chính tả
+- Quick Telex
+- Modern orthography
+- Macro
+- Chuyển mode theo từng ứng dụng
+- Hotkey đổi mode compose, mặc định là `Alt+Space`
 
-**Cài bằng Homebrew:** (by nhymxu)  
-Nếu chưa cài Homebrew, mở terminal, nhập:
+## Yêu cầu
+
+Bạn cần tối thiểu:
+
+- Linux có `fcitx5`
+- `cmake >= 3.15`
+- compiler C++17
+- `pkg-config`
+- thư viện dev của `fcitx5`
+
+Nếu muốn fallback bằng `uinput` hoạt động ổn định thì cần:
+
+- có thiết bị `/dev/uinput`
+- user hiện tại có quyền truy cập `/dev/uinput`
+
+## Cài dependencies
+
+Tên gói có thể khác nhẹ giữa các version distro, nhưng các lệnh dưới đây là điểm bắt đầu đúng cho đa số máy.
+
+### Ubuntu / Debian
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential \
+  cmake \
+  pkg-config \
+  extra-cmake-modules \
+  gettext \
+  fcitx5 \
+  fcitx5-config-qt \
+  fcitx5-frontend-gtk3 \
+  fcitx5-frontend-qt5 \
+  libfcitx5core-dev \
+  libfcitx5config-dev \
+  libfcitx5utils-dev
 ```
-$ /usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
+
+Nếu thiếu gói dev chi tiết, có thể thử:
+
+```bash
+sudo apt-get install -y fcitx5-dev
 ```
 
-Kiểm tra phiên bản OpenKey:
-```
-$ brew info --cask openkey
-```
-Gõ lệnh sau để homebrew tự cài OpenKey cho bạn:
-```
-$ brew install --cask openkey
+Nếu máy chưa dùng `fcitx5` làm input method mặc định:
+
+```bash
+im-config -n fcitx5
 ```
 
-Để update phiên bản mới nhất của OpenKey
+Sau đó đăng xuất và đăng nhập lại.
+
+### Fedora
+
+```bash
+sudo dnf install \
+  gcc-c++ \
+  cmake \
+  pkgconf-pkg-config \
+  extra-cmake-modules \
+  gettext \
+  fcitx5 \
+  fcitx5-configtool \
+  fcitx5-gtk \
+  fcitx5-qt \
+  fcitx5-devel
 ```
-$ brew upgrade --cask openkey
+
+### Arch Linux
+
+```bash
+sudo pacman -S --needed \
+  base-devel \
+  cmake \
+  pkgconf \
+  extra-cmake-modules \
+  gettext \
+  fcitx5-im \
+  fcitx5-configtool
 ```
 
-## Note - Lưu ý:
-OpenKey cần cấp quyền, vào *System Preferences -> Security & Privacy -> Accessibility*, kích hoạt `OpenKey.app`. **Không tắt nó khi đang dùng OpenKey**.
-![Guide](https://raw.githubusercontent.com/tuyenvm/tuyenvm.github.io/master/images/openkey-guide.png "Accessibility").
+## Cài OpenKey
 
-## Tác giả
-- Mai Vũ Tuyên.
-- Mọi góp ý, gửi cho mình qua maivutuyen.91@gmail.com  
-- Fanpage: [https://www.facebook.com/OpenKeyVN](https://www.facebook.com/OpenKeyVN)
+### Cách nhanh nhất trên Debian / Ubuntu
 
-## Liên kết
-- [OpenKey cho Windows, xem chi tiết tại đây](https://github.com/tuyenvm/OpenKey/tree/master/Sources/OpenKey/win32)
-- [OpenKey cho Linux (đang phát triển)](https://github.com/tuyenvm/OpenKey/tree/master/Sources/OpenKey/linux)
-## Một điều nhỏ nhoi
-Đừng quên ủng hộ tác giả bằng cách mua ly cafe cho tác giả tỉnh ngủ nhé:  
-[Buy me a coffee ^^](https://tuyenvm.github.io/donate.html)  
-[Redbull cũng được ^^](https://paypal.me/tuyenmai)  
-Hoặc trực tiếp qua ví momo:   
-![Donate by momo](https://tuyenvm.github.io/images/momo.png "Momo").   
+Repo có sẵn script:
 
-Cảm ơn các bạn rất nhiều.
+```bash
+./scripts/install.sh
+```
+
+Script này sẽ:
+
+- cài dependencies bằng `apt`
+- build addon
+- cài vào hệ thống
+- cấu hình quyền cơ bản cho `/dev/uinput`
+- restart `fcitx5`
+
+Nếu sau khi chạy script mà vẫn báo `permission denied` với `/dev/uinput`, hãy đăng xuất rồi đăng nhập lại để group mới có hiệu lực.
+
+### Cài thủ công cho mọi distro
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+sudo cmake --install build
+```
+
+Khởi động lại `fcitx5`:
+
+```bash
+fcitx5 -rd
+```
+
+### Cài vào user local, không đụng system-wide
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+cmake --build build -j
+cmake --install build
+fcitx5 -rd
+```
+
+## Bật OpenKey trong Fcitx5
+
+Sau khi cài xong:
+
+1. Mở `fcitx5-configtool`
+2. Chọn `Add input method`
+3. Tìm `OpenKey`
+4. Add vào danh sách input method
+
+Nếu chưa thấy `OpenKey`:
+
+- chạy lại `fcitx5 -rd`
+- đăng xuất / đăng nhập lại
+- kiểm tra addon đã được cài đúng chưa
+
+## File cấu hình quan trọng
+
+- `~/.config/fcitx5/conf/openkey.conf`: cấu hình chính
+- `~/.config/fcitx5/conf/openkey-appmodes.conf`: mode theo ứng dụng
+
+Nếu bật macro, file macro được lấy theo đường dẫn bạn set trong cấu hình OpenKey.
+
+## Wayland / GNOME
+
+Trên GNOME Wayland, một số app không cung cấp tên app rõ ràng cho `fcitx5`, làm việc chọn mode kém chính xác. Repo có sẵn GNOME Shell extension để bridge app đang focus qua D-Bus.
+
+Cài extension:
+
+```bash
+./extension/install.sh
+gnome-extensions enable openkey-bridge@openkey.dev
+```
+
+Sau đó relogin hoặc restart GNOME Shell nếu cần.
+
+Không phải máy nào cũng cần extension này. Chỉ nên cài nếu bạn thấy mode tự chọn bị sai nhiều trên GNOME Wayland.
+
+## Lỗi thường gặp
+
+### 1. Cài xong nhưng không thấy OpenKey trong `fcitx5-configtool`
+
+Nguyên nhân thường gặp:
+
+- chưa `cmake --install`
+- `fcitx5` chưa reload
+- cài local nhưng session chưa thấy đường dẫn mới
+
+Cách xử lý:
+
+```bash
+fcitx5 -rd
+```
+
+Nếu vẫn chưa thấy, đăng xuất rồi đăng nhập lại.
+
+### 2. Gõ không ra tiếng Việt
+
+Thường là do `fcitx5` chưa thật sự là input method đang chạy.
+
+Kiểm tra:
+
+- chỉ dùng một bộ gõ chính, tránh chạy song song `ibus` hoặc bộ gõ khác
+- trên Debian/Ubuntu, chạy `im-config -n fcitx5`
+- đảm bảo đã cài frontend GTK/Qt của `fcitx5`
+- relogin sau khi đổi input method
+
+### 3. Chỉ gõ được ở terminal, không gõ được ở app GUI
+
+Nguyên nhân thường là thiếu frontend:
+
+- thiếu `fcitx5-frontend-gtk3`
+- thiếu `fcitx5-frontend-qt5`
+- session GUI chưa nhận biến môi trường sau khi cài
+
+Cách xử lý tốt nhất là cài đủ frontend rồi relogin.
+
+### 4. Gõ bị lặp chữ, ăn backspace sai, hoặc app xử lý dấu kỳ lạ
+
+Một số app, nhất là browser / Electron / app trên Wayland, không xử lý `surrounding text` giống nhau. OpenKey có cơ chế tự chuyển mode, nhưng vẫn có app khó chiều.
+
+Cách xử lý:
+
+- thử đổi mode bằng `Alt+Space`
+- với GNOME Wayland, cân nhắc cài extension bridge
+- restart `fcitx5`
+
+### 5. Không gõ được trong một số ô nhập liệu web
+
+Đây thường là vấn đề mode chứ không phải addon hỏng.
+
+Nên thử:
+
+- đổi mode compose bằng `Alt+Space`
+- đóng app rồi mở lại
+- nếu đang GNOME Wayland, cài bridge extension
+
+### 6. `/dev/uinput` không tồn tại
+
+Kiểm tra:
+
+```bash
+ls -l /dev/uinput
+```
+
+Nếu chưa có:
+
+```bash
+sudo modprobe uinput
+```
+
+Nếu distro không tự nạp module này lúc boot, bạn cần tự cấu hình hệ thống để nạp `uinput`.
+
+### 7. `/dev/uinput: permission denied`
+
+Đây là lỗi rất hay gặp khi addon fallback sang `uinput`.
+
+Cách xử lý:
+
+- thêm user vào group có quyền dùng `uinput`
+- tạo udev rule cho `/dev/uinput`
+- đăng xuất / đăng nhập lại sau khi thêm group
+
+Script `./scripts/install.sh` đã cố gắng làm sẵn phần này trên Debian/Ubuntu.
+
+### 8. Gõ được lúc đầu, sau đó một số app không nhận đúng mode
+
+OpenKey có lưu mode theo ứng dụng vào:
+
+```bash
+~/.config/fcitx5/conf/openkey-appmodes.conf
+```
+
+Nếu file này chứa mode không phù hợp với app hiện tại, bạn có thể sửa tay hoặc xóa file để OpenKey học lại từ đầu.
+
+### 9. Không chắc lỗi nằm ở OpenKey hay ở `fcitx5`
+
+Trên Debian/Ubuntu, repo có script cài lại stack `fcitx5`:
+
+```bash
+./scripts/reinstall_fcitx5.sh
+```
+
+Script này phù hợp khi môi trường `fcitx5` trên máy đã rối từ trước.
+
+## Gỡ cài đặt
+
+```bash
+./scripts/uninstall.sh
+```
+
+Nếu bạn đã cài bằng build khác hoặc prefix khác, xem help:
+
+```bash
+./scripts/uninstall.sh --help
+```
+
+## Build để test nhanh
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build
+```
+
+## Mã nguồn liên quan
+
+- `src/`: addon Linux cho `fcitx5`
+- `Sources/OpenKey/engine/`: core xử lý tiếng Việt
+- `extension/`: GNOME Shell bridge cho Wayland
+- `scripts/`: script cài, gỡ và sửa môi trường `fcitx5`
+
+## Giấy phép
+
+Dự án dùng giấy phép `GPL`.
