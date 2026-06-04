@@ -82,6 +82,12 @@ FCITX_CONFIGURATION(OpenKeyConfig,
                             "BackspaceRewriteUinputInterKeyUsec",
                             N_("Backspace-rewrite: uinput inter-backspace delay (usec)"),
                             1000};
+                    fcitx::HiddenOption<int>
+                        browserRewriteCommitDelayUsec{
+                            this,
+                            "BrowserRewriteCommitDelayUsec",
+                            N_("Browser mode: delay after uinput backspace before commit (usec)"),
+                            150000};
                     fcitx::Option<bool> freeMark{this,
                                                  "FreeMark",
                                                  N_("Free Mark"),
@@ -169,30 +175,71 @@ FCITX_CONFIGURATION(OpenKeyConfig,
 
 enum class RuntimeMode {
     Auto,
+    Browser,
     BackspaceRewriteDelta,
     SurroundingText,
     Preedit,
     DirectCommit,
 };
 
-struct OpenKeyState : public fcitx::InputContextProperty {
-    // Backspace-rewrite mode state.
+struct BrowserRewriteState {
     std::string shownText;
-    // True once the current word has been rewritten by OpenKey.
+    bool hasRewrittenCurrentWord = false;
+    bool rewriteLock = false;
+    int expectedBackspaces = 0;
+    int lateBackspaceBudget = 0;
+    std::vector<fcitx::Key> pendingKeys;
+    std::unique_ptr<fcitx::EventSourceTime> drainPendingTimer;
+    std::unique_ptr<fcitx::EventSourceTime> commitTimer;
+    std::unique_ptr<fcitx::EventSourceTime> lateBackspaceTimeoutTimer;
+    std::string pendingConvertedText;
+    std::string pendingShownTextAfterCommit;
+
+    void clear() {
+        shownText.clear();
+        hasRewrittenCurrentWord = false;
+        rewriteLock = false;
+        expectedBackspaces = 0;
+        lateBackspaceBudget = 0;
+        pendingKeys.clear();
+        drainPendingTimer.reset();
+        commitTimer.reset();
+        lateBackspaceTimeoutTimer.reset();
+        pendingConvertedText.clear();
+        pendingShownTextAfterCommit.clear();
+    }
+};
+
+struct DeltaRewriteState {
+    std::string shownText;
     bool hasRewrittenCurrentWord = false;
     bool rewriteLock = false;
     bool waitingBackspaceAck = false;
     int expectedBackspaces = 0;
     int seenBackspaces = 0;
     std::vector<fcitx::Key> pendingKeys;
-    uint64_t lastPhysicalKeyUsec = 0;
-    std::unique_ptr<fcitx::EventSourceTime> rewriteTimer;
     std::unique_ptr<fcitx::EventSourceTime> commitTimer;
-    std::unique_ptr<fcitx::EventSourceTime> modeInfoTimer;
     std::string pendingConvertedText;
     std::string pendingShownTextAfterCommit;
-    fcitx::Key pendingBoundaryKey;
-    bool hasPendingBoundaryKey = false;
+
+    void clear() {
+        shownText.clear();
+        hasRewrittenCurrentWord = false;
+        rewriteLock = false;
+        waitingBackspaceAck = false;
+        expectedBackspaces = 0;
+        seenBackspaces = 0;
+        pendingKeys.clear();
+        commitTimer.reset();
+        pendingConvertedText.clear();
+        pendingShownTextAfterCommit.clear();
+    }
+};
+
+struct OpenKeyState : public fcitx::InputContextProperty {
+    BrowserRewriteState browser;
+    DeltaRewriteState delta;
+    std::unique_ptr<fcitx::EventSourceTime> modeInfoTimer;
 
     std::string composing;
     std::string lastCommitted;
@@ -252,6 +299,7 @@ private:
     // InputContext::program() is empty (common on Wayland for some clients).
     std::unique_ptr<FocusedAppBridge> focusedAppBridge_;
 
+    std::unique_ptr<InputModeHandler> browserRewriteHandler_;
     std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
 
     bool debugEnabled() const;
