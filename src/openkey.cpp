@@ -224,6 +224,10 @@ static std::string runtimeModeToString(RuntimeMode mode) {
     switch (mode) {
     case RuntimeMode::Auto:
         return "auto";
+    case RuntimeMode::Browser:
+        return "browser";
+    case RuntimeMode::BrowserX11:
+        return "browser-x11";
     case RuntimeMode::Preedit:
         return "preedit";
     case RuntimeMode::SurroundingText:
@@ -239,6 +243,14 @@ static std::string runtimeModeToString(RuntimeMode mode) {
 static bool runtimeModeFromString(const std::string &mode, RuntimeMode &out) {
     if (equalsASCIIInsensitive(mode, "auto")) {
         out = RuntimeMode::Auto;
+        return true;
+    }
+    if (equalsASCIIInsensitive(mode, "browser")) {
+        out = RuntimeMode::Browser;
+        return true;
+    }
+    if (equalsASCIIInsensitive(mode, "browser-x11")) {
+        out = RuntimeMode::BrowserX11;
         return true;
     }
     if (equalsASCIIInsensitive(mode, "preedit")) {
@@ -396,6 +408,38 @@ static bool isWaylandBackend(fcitx::InputContext *ic) {
     return false;
 }
 
+static bool shouldUsePreeditForX11Browser(fcitx::InputContext *ic,
+                                          const std::string &program) {
+    return isX11Backend(ic) && isBrowserProgram(program);
+}
+
+static bool hasReliableSurroundingText(fcitx::InputContext *ic) {
+    if (!ic) {
+        return false;
+    }
+    const auto &st = ic->surroundingText();
+    if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+        return false;
+    }
+    if (!st.isValid() || st.cursor() != st.anchor()) {
+        return false;
+    }
+    if (!fcitx::utf8::validate(st.text())) {
+        return false;
+    }
+    if (st.cursor() > fcitx::utf8::length(st.text())) {
+        return false;
+    }
+    return true;
+}
+
+static bool shouldHideBrowserModesForProgram(fcitx::InputContext *ic,
+                                             const std::string &program) {
+    if (isBrowserProgram(program)) {
+        return false;
+    }
+    return hasReliableSurroundingText(ic);
+}
 
 static bool shouldUseDST(fcitx::InputContext *ic, const std::string &program,
                          int count) {
@@ -455,6 +499,33 @@ public:
             return Method::Uinput;
         }
         return Method::None;
+    }
+
+    Method sendBackspacesUinputOnly(fcitx::InputContext *ic,
+                                    const std::string &program, int count,
+                                    bool debug,
+                                    uint64_t uinputInterKeyUsec = 1500) {
+        if (count <= 0) {
+            return Method::None;
+        }
+        if (!ensureUinput(debug)) {
+            if (debug) {
+                FCITX_INFO() << "openkey: backspace method=browser-uinput-none"
+                             << " program=" << program
+                             << " frontend=" << (ic && ic->frontend() ? ic->frontend() : "")
+                             << " count=" << count
+                             << " reason=uinput-unavailable";
+            }
+            return Method::None;
+        }
+        if (debug) {
+            FCITX_INFO() << "openkey: backspace method=browser-uinput"
+                         << " program=" << program
+                         << " frontend=" << (ic && ic->frontend() ? ic->frontend() : "")
+                         << " count=" << count;
+        }
+        sendBackspacesUinput(count, uinputInterKeyUsec);
+        return Method::Uinput;
     }
 
     bool uinputAvailable(bool debug) { return ensureUinput(debug); }
@@ -685,7 +756,18 @@ private:
 
 namespace {
 
-struct ModeDeps {
+struct BrowserModeDeps {
+    fcitx::Instance *instance = nullptr;
+    fcitx::SimpleInputContextPropertyFactory<OpenKeyState> *factory = nullptr;
+    std::shared_ptr<OpenKeyAdapter> adapter;
+    BackspaceInjector *backspaceInjector = nullptr;
+    std::weak_ptr<void> lifetimeWeak;
+    std::function<bool()> debugEnabled;
+    std::function<uint64_t()> bsRewriteUinputInterKeyUsec;
+    std::function<uint64_t()> browserRewriteCommitDelayUsec;
+};
+
+struct DeltaModeDeps {
     fcitx::Instance *instance = nullptr;
     fcitx::SimpleInputContextPropertyFactory<OpenKeyState> *factory = nullptr;
     std::shared_ptr<OpenKeyAdapter> adapter;
@@ -693,26 +775,20 @@ struct ModeDeps {
     std::weak_ptr<void> lifetimeWeak;
     std::function<bool()> debugEnabled;
     std::function<uint64_t()> bsRewriteCommitExtraUsec;
-    std::function<uint64_t()> bsRewriteCommitCapUsec;
     std::function<uint64_t()> bsRewriteUinputInterKeyUsec;
 };
 
-class BackspaceRewriteModeHandler final : public InputModeHandler {
+class BrowserModeHandler final : public InputModeHandler {
 public:
-    explicit BackspaceRewriteModeHandler(ModeDeps deps)
+    explicit BrowserModeHandler(BrowserModeDeps deps)
         : deps_(std::move(deps)) {}
 
     bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
                    OpenKeyState &state) override {
         auto key = event.key().normalize();
-
         if (event.isRelease()) {
             return false;
         }
-
-        const uint64_t nowUsec = fcitx::now(CLOCK_MONOTONIC);
-
-        // Do not swallow application shortcuts.
         if (hasCtrlAltSuperMeta(key)) {
             return false;
         }
@@ -725,7 +801,12 @@ public:
             deps_.bsRewriteUinputInterKeyUsec
                 ? deps_.bsRewriteUinputInterKeyUsec()
                 : 1500;
+        const uint64_t browserCommitDelayUsec =
+            deps_.browserRewriteCommitDelayUsec
+                ? deps_.browserRewriteCommitDelayUsec()
+                : 150000;
         auto *loop = deps_.instance ? &deps_.instance->eventLoop() : nullptr;
+        auto &browserState = state.browser;
 
         auto stateFor = [this](fcitx::InputContext *ic2) -> OpenKeyState * {
             if (!ic2 || !deps_.factory) {
@@ -734,17 +815,8 @@ public:
             return ic2->propertyFor(deps_.factory);
         };
 
-        auto clearWordState = [&state]() {
-            state.shownText.clear();
-            state.hasRewrittenCurrentWord = false;
-            state.waitingBackspaceAck = false;
-            state.expectedBackspaces = 0;
-            state.seenBackspaces = 0;
-            state.pendingConvertedText.clear();
-            state.pendingShownTextAfterCommit.clear();
-            state.pendingKeys.clear();
-            state.commitTimer.reset();
-            state.rewriteLock = false;
+        auto clearWordState = [&browserState]() {
+            browserState.clear();
         };
 
         auto drainPendingKeys = [this, icRef, lifetimeWeak, stateFor]() {
@@ -756,15 +828,13 @@ public:
                 return;
             }
             auto *st = stateFor(ic2);
-            if (!st || st->pendingKeys.empty()) {
+            if (!st || st->browser.pendingKeys.empty()) {
                 return;
             }
-            // Move out to avoid re-entrancy issues.
-            auto keys = std::move(st->pendingKeys);
-            st->pendingKeys.clear();
+            auto keys = std::move(st->browser.pendingKeys);
+            st->browser.pendingKeys.clear();
             for (const auto &k : keys) {
-                fcitx::KeyEvent synthetic(ic2, k, false /* release */,
-                                          0 /* time */);
+                fcitx::KeyEvent synthetic(ic2, k, false, 0);
                 const bool handled = handleKey(ic2, synthetic, *st);
                 if (!handled && !synthetic.accepted()) {
                     ic2->forwardKey(k);
@@ -772,52 +842,142 @@ public:
             }
         };
 
-        auto finishPendingBackspaceCommit =
-            [this, icRef, lifetimeWeak, stateFor, drainPendingKeys]() {
-                if (lifetimeWeak.expired()) {
+        // Không replay pending key ngay trong callback timer để tránh
+        // re-entrancy khi key replay khởi tạo transaction Browser mới.
+        auto scheduleDrainPendingKeys =
+            [icRef, lifetimeWeak, loop, stateFor,
+             drainPendingKeys](BrowserRewriteState &browserState2) {
+                browserState2.drainPendingTimer.reset();
+                if (!loop) {
+                    drainPendingKeys();
                     return;
                 }
-                auto *ic2 = icRef.get();
-                if (!ic2) {
+                const uint64_t deadline = fcitx::now(CLOCK_MONOTONIC) + 1;
+                browserState2.drainPendingTimer = loop->addTimeEvent(
+                    CLOCK_MONOTONIC, deadline, 0,
+                    [icRef, lifetimeWeak, stateFor,
+                     drainPendingKeys](fcitx::EventSourceTime *, uint64_t) {
+                        if (lifetimeWeak.expired()) {
+                            return false;
+                        }
+                        auto *ic2 = icRef.get();
+                        if (!ic2) {
+                            return false;
+                        }
+                        auto *st = stateFor(ic2);
+                        if (!st) {
+                            return false;
+                        }
+                        auto _timer = std::move(st->browser.drainPendingTimer);
+                        drainPendingKeys();
+                        return false;
+                    });
+                if (browserState2.drainPendingTimer) {
+                    browserState2.drainPendingTimer->setOneShot();
                     return;
                 }
-                auto *st = stateFor(ic2);
-                if (!st) {
-                    return;
-                }
-
-                const std::string commitText =
-                    std::move(st->pendingConvertedText);
-                const std::string shownAfter =
-                    std::move(st->pendingShownTextAfterCommit);
-                st->commitTimer.reset();
-                st->pendingConvertedText.clear();
-                st->pendingShownTextAfterCommit.clear();
-
-                if (!commitText.empty()) {
-                    ic2->commitString(commitText);
-                }
-                st->shownText = shownAfter;
-                st->rewriteLock = false;
-                st->waitingBackspaceAck = false;
-                st->expectedBackspaces = 0;
-                st->seenBackspaces = 0;
-
                 drainPendingKeys();
             };
 
-        auto scheduleCommitAfterBackspace =
-            [this, icRef, lifetimeWeak, loop, stateFor, &state,
-             finishPendingBackspaceCommit](uint64_t delayUsec) {
-                state.commitTimer.reset();
-                if (!loop) {
+        auto scheduleLateBudgetTimeoutDrain =
+            [icRef, lifetimeWeak, loop, stateFor,
+             scheduleDrainPendingKeys](BrowserRewriteState &browserState2) {
+                if (browserState2.lateBackspaceBudget == 0) {
+                    scheduleDrainPendingKeys(browserState2);
                     return;
                 }
-                const uint64_t deadline =
-                    fcitx::now(CLOCK_MONOTONIC) + delayUsec;
-                state.commitTimer = loop->addTimeEvent(
+                // Budget chưa về 0: đợi tối đa 200ms rồi force drain.
+                browserState2.lateBackspaceTimeoutTimer.reset();
+                if (!loop) {
+                    browserState2.lateBackspaceBudget = 0;
+                    scheduleDrainPendingKeys(browserState2);
+                    return;
+                }
+                const uint64_t deadline = fcitx::now(CLOCK_MONOTONIC) + 200000;
+                browserState2.lateBackspaceTimeoutTimer = loop->addTimeEvent(
                     CLOCK_MONOTONIC, deadline, 0,
-                    [this, icRef, lifetimeWeak, stateFor,
+                    [icRef, lifetimeWeak, stateFor,
+                     scheduleDrainPendingKeys](fcitx::EventSourceTime *,
+                                              uint64_t) {
+                        if (lifetimeWeak.expired()) {
+                            return false;
+                        }
+                        auto *ic3 = icRef.get();
+                        if (!ic3) {
+                            return false;
+                        }
+                        auto *st3 = stateFor(ic3);
+                        if (!st3) {
+                            return false;
+                        }
+                        auto _timer =
+                            std::move(st3->browser.lateBackspaceTimeoutTimer);
+                        if (st3->browser.lateBackspaceBudget > 0) {
+                            FCITX_INFO()
+                                << "openkey: browser late-bs timeout"
+                                << " budget=" << st3->browser.lateBackspaceBudget
+                                << " force-drain";
+                            st3->browser.lateBackspaceBudget = 0;
+                        }
+                        scheduleDrainPendingKeys(st3->browser);
+                        return false;
+                    });
+                if (browserState2.lateBackspaceTimeoutTimer) {
+                    browserState2.lateBackspaceTimeoutTimer->setOneShot();
+                    return;
+                }
+                browserState2.lateBackspaceBudget = 0;
+                scheduleDrainPendingKeys(browserState2);
+            };
+
+        auto finishPendingBackspaceCommit = [icRef, lifetimeWeak, stateFor]() {
+            if (lifetimeWeak.expired()) {
+                return;
+            }
+            auto *ic2 = icRef.get();
+            if (!ic2) {
+                return;
+            }
+            auto *st = stateFor(ic2);
+            if (!st) {
+                return;
+            }
+
+            auto &browserState2 = st->browser;
+            const std::string commitText =
+                std::move(browserState2.pendingConvertedText);
+            const std::string shownAfter =
+                std::move(browserState2.pendingShownTextAfterCommit);
+            browserState2.commitTimer.reset();
+            browserState2.pendingConvertedText.clear();
+            browserState2.pendingShownTextAfterCommit.clear();
+
+            if (!commitText.empty()) {
+                ic2->commitString(commitText);
+            }
+            browserState2.shownText = shownAfter;
+            // Không clear lock, không drain ở đây.
+        };
+
+        auto scheduleCommitAfterBackspace =
+            [icRef, lifetimeWeak, loop, stateFor, &browserState,
+             scheduleLateBudgetTimeoutDrain, finishPendingBackspaceCommit](
+                uint64_t delayUsec) {
+                browserState.commitTimer.reset();
+                if (!loop) {
+                    finishPendingBackspaceCommit();
+                    browserState.lateBackspaceBudget =
+                        browserState.expectedBackspaces;
+                    browserState.expectedBackspaces = 0;
+                    browserState.rewriteLock = false;
+                    scheduleLateBudgetTimeoutDrain(browserState);
+                    return;
+                }
+                const uint64_t deadline = fcitx::now(CLOCK_MONOTONIC) + delayUsec;
+                browserState.commitTimer = loop->addTimeEvent(
+                    CLOCK_MONOTONIC, deadline, 0,
+                    [icRef, lifetimeWeak, stateFor,
+                     scheduleLateBudgetTimeoutDrain,
                      finishPendingBackspaceCommit](fcitx::EventSourceTime *,
                                                    uint64_t) {
                         if (lifetimeWeak.expired()) {
@@ -831,155 +991,603 @@ public:
                         if (!st) {
                             return false;
                         }
-                        auto _timer = std::move(st->commitTimer);
+                        auto _timer = std::move(st->browser.commitTimer);
                         finishPendingBackspaceCommit();
+                        st->browser.lateBackspaceBudget =
+                            st->browser.expectedBackspaces;
+                        st->browser.expectedBackspaces = 0;
+                        st->browser.rewriteLock = false;
+                        scheduleLateBudgetTimeoutDrain(st->browser);
                         return false;
                     });
-                if (state.commitTimer) {
-                    state.commitTimer->setOneShot();
+                if (browserState.commitTimer) {
+                    browserState.commitTimer->setOneShot();
                 }
             };
 
-	auto applyWordDelta = [&, this](const std::string &newWord,
-	                                char asciiChar,
-	                                const char *reason) -> bool {
-	    if (!deps_.backspaceInjector) {
-	        return false;
-	    }
-    if (!fcitx::utf8::validate(state.shownText) ||
-        !fcitx::utf8::validate(newWord)) {
-        clearWordState();
-        return false;
-    }
-
-    const std::string oldShown = state.shownText;
-    const std::string rawAppend = oldShown + asciiChar;
-
-    const std::size_t prefixLen =
-        commonPrefixBytesUTF8Boundary(state.shownText, newWord);
-    unsigned int deleteCount =
-        utf8CharCount(state.shownText.substr(prefixLen));
-    std::string commitText = newWord.substr(prefixLen);
-    if (deleteCount > 128) {
-        deleteCount = utf8CharCount(state.shownText);
-        commitText = newWord;
-    }
-
-    if (debug) {
-        FCITX_INFO() << "openkey: bs-delta program=" << state.program
-                     << " reason=" << reason
-                     << " from=" << state.shownText
-                     << " to=" << newWord
-                     << " delete=" << deleteCount
-                     << " commit=" << commitText;
-    }
-
-    if (deleteCount == 0) {
-        if (!commitText.empty()) {
-            ic->commitString(commitText);
-        }
-        state.shownText = newWord;
-        state.hasRewrittenCurrentWord =
-            state.hasRewrittenCurrentWord || (newWord != rawAppend);
-        event.filterAndAccept();
-        return true;
-	    }
-	
-	    // Thử DeleteSurroundingText trước (GTK, Qt app reliable)
-const std::string programForInjector = state.program;
-	    const auto method = deps_.backspaceInjector->sendBackspaces(
-	        ic, programForInjector, static_cast<int>(deleteCount), debug,
-	        uinputInterKeyUsec);
-
-    if (method == BackspaceInjector::Method::DeleteSurroundingText) {
-        // Không cần chờ ack, commit ngay
-        if (!commitText.empty()) {
-            ic->commitString(commitText);
-        }
-        state.shownText = newWord;
-        state.hasRewrittenCurrentWord =
-            state.hasRewrittenCurrentWord || (newWord != rawAppend);
-        event.filterAndAccept();
-        return true;
-    }
-
-	    if (method == BackspaceInjector::Method::Uinput) {
-	        // Inject thêm 1 backspace extra làm trigger ack
-	        // (N backspace xóa text + 1 backspace loop back báo xong)
-	        deps_.backspaceInjector->sendBackspaces(
-	            ic, programForInjector, 1, debug, uinputInterKeyUsec);
-
-        state.rewriteLock = true;
-        state.waitingBackspaceAck = true;
-        state.expectedBackspaces = static_cast<int>(deleteCount) + 1;
-        state.seenBackspaces = 0;
-        state.pendingConvertedText = std::move(commitText);
-        state.pendingShownTextAfterCommit = newWord;
-        event.filterAndAccept();
-        return true;
-    }
-
-    // Uinput không available
-    clearWordState();
-    return false;
-};
-        if (state.waitingBackspaceAck) {
-            if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
-                key.check(FcitxKey_ISO_Enter) || key.isCursorMove() ||
-                key.check(FcitxKey_Delete) || key.check(FcitxKey_Tab) ||
-                key.check(FcitxKey_Escape)) {
-                finishPendingBackspaceCommit();
-                state.pendingKeys.clear();
+        auto applyWordDelta = [&, this](const std::string &newWord,
+                                        char asciiChar,
+                                        const char *reason) -> bool {
+            if (!deps_.backspaceInjector) {
                 return false;
             }
-            if (key.check(FcitxKey_BackSpace) && !hasCtrlAltSuperMeta(key)) {
-                state.seenBackspaces++;
-                if (state.seenBackspaces < state.expectedBackspaces) {
-                    // Let the injected backspaces reach the app to delete.
-                    return false;
-                }
-
-                // Filter the final trigger backspace (extra +1).
+            if (browserState.rewriteLock ||
+                browserState.lateBackspaceBudget > 0) {
+                browserState.pendingKeys.push_back(key);
                 event.filterAndAccept();
+                return true;
+            }
+            if (!fcitx::utf8::validate(browserState.shownText) ||
+                !fcitx::utf8::validate(newWord)) {
+                clearWordState();
+                return false;
+            }
 
-                const uint64_t extraUsec = deps_.bsRewriteCommitExtraUsec
-                                               ? deps_.bsRewriteCommitExtraUsec()
-                                               : 0;
-                scheduleCommitAfterBackspace(extraUsec);
+            const std::string oldShown = browserState.shownText;
+            const std::string rawAppend = oldShown + asciiChar;
+
+            const std::size_t prefixLen =
+                commonPrefixBytesUTF8Boundary(browserState.shownText, newWord);
+            unsigned int deleteCount =
+                utf8CharCount(browserState.shownText.substr(prefixLen));
+            std::string commitText = newWord.substr(prefixLen);
+            if (deleteCount > 128) {
+                deleteCount = utf8CharCount(browserState.shownText);
+                commitText = newWord;
+            }
+
+            if (debug) {
+                FCITX_INFO() << "openkey: bs-delta program=" << state.program
+                             << " reason=" << reason
+                             << " from=" << browserState.shownText
+                             << " to=" << newWord
+                             << " delete=" << deleteCount
+                             << " commit=" << commitText;
+            }
+
+            if (deleteCount == 0) {
+                if (!commitText.empty()) {
+                    ic->commitString(commitText);
+                }
+                browserState.shownText = newWord;
+                browserState.hasRewrittenCurrentWord =
+                    browserState.hasRewrittenCurrentWord ||
+                    (newWord != rawAppend);
+                event.filterAndAccept();
                 return true;
             }
 
-            // Buffer any other keys during deletion and replay after commit.
-            state.pendingKeys.push_back(key);
+            const std::string programForInjector = state.program;
+            const auto method = deps_.backspaceInjector->sendBackspacesUinputOnly(
+                ic, programForInjector, static_cast<int>(deleteCount), debug,
+                uinputInterKeyUsec);
+            if (method != BackspaceInjector::Method::Uinput) {
+                clearWordState();
+                return false;
+            }
+
+            browserState.rewriteLock = true;
+            browserState.expectedBackspaces = static_cast<int>(deleteCount);
+            browserState.pendingConvertedText = std::move(commitText);
+            browserState.pendingShownTextAfterCommit = newWord;
+            browserState.hasRewrittenCurrentWord =
+                browserState.hasRewrittenCurrentWord || (newWord != rawAppend);
+            event.filterAndAccept();
+            scheduleCommitAfterBackspace(browserCommitDelayUsec);
+            return true;
+        };
+
+        if (browserState.rewriteLock) {
+            if (browserState.expectedBackspaces > 0 &&
+                key.check(FcitxKey_BackSpace) &&
+                !hasCtrlAltSuperMeta(key)) {
+                browserState.expectedBackspaces--;
+                return false;
+            }
+            browserState.pendingKeys.push_back(key);
             event.filterAndAccept();
             return true;
         }
 
-        // If we are currently rewriting, queue and swallow all physical keys.
-        if (state.rewriteLock) {
-            state.pendingKeys.push_back(key);
+        if (browserState.lateBackspaceBudget > 0 &&
+            key.check(FcitxKey_BackSpace) &&
+            !hasCtrlAltSuperMeta(key)) {
+            // Swallow backspace uinput về muộn sau khi transaction đã mở lock.
+            browserState.lateBackspaceBudget--;
             event.filterAndAccept();
+            if (browserState.lateBackspaceBudget == 0) {
+                browserState.lateBackspaceTimeoutTimer.reset();
+                scheduleDrainPendingKeys(browserState);
+            }
             return true;
         }
 
-        // Cursor move / delete: end composing state.
         if (key.isCursorMove() || key.check(FcitxKey_Delete)) {
             clearWordState();
             return false;
         }
 
-        // Escape ends current composing word.
         if (key.check(FcitxKey_Escape)) {
             clearWordState();
             return false;
         }
 
-        // Physical BackSpace: delete one visible rune.
         if (key.check(FcitxKey_BackSpace)) {
-            if (state.shownText.empty()) {
+            if (browserState.shownText.empty()) {
                 return false;
             }
-            if (!state.hasRewrittenCurrentWord) {
+            if (!browserState.hasRewrittenCurrentWord) {
+                clearWordState();
+                return false;
+            }
+            browserState.shownText = utf8DropLastN(browserState.shownText, 1);
+            if (browserState.shownText.empty()) {
+                browserState.hasRewrittenCurrentWord = false;
+            }
+            return false;
+        }
+
+        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
+        if (uni >= 0x20 && uni <= 0x7E) {
+            const char c = static_cast<char>(uni);
+
+            if (isBoundaryASCII(c) || key.check(FcitxKey_Return) ||
+                key.check(FcitxKey_KP_Enter) || key.check(FcitxKey_ISO_Enter) ||
+                key.check(FcitxKey_Tab)) {
+                clearWordState();
+                return false;
+            }
+
+            if (isComposingASCII(c)) {
+                if (!adapterShared) {
+                    return false;
+                }
+                adapterShared->setCodeTable(state.codeTable);
+                const auto r =
+                    adapterShared->processAsciiKey(browserState.shownText, c);
+                if (!r.handled) {
+                    return false;
+                }
+                return applyWordDelta(r.newWord, c, "ascii");
+            }
+
+            clearWordState();
+            return false;
+        }
+
+        clearWordState();
+        return false;
+    }
+
+private:
+    BrowserModeDeps deps_;
+};
+
+class BrowserX11ModeHandler final : public InputModeHandler {
+public:
+    explicit BrowserX11ModeHandler(DeltaModeDeps deps)
+        : deps_(std::move(deps)) {}
+
+    bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
+                   OpenKeyState &state) override {
+        auto key = event.key().normalize();
+        if (event.isRelease()) {
+            return false;
+        }
+        if (hasCtrlAltSuperMeta(key)) {
+            return false;
+        }
+
+        const auto icRef = ic->watch();
+        const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
+        const auto adapterShared = deps_.adapter;
+        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
+        const uint64_t uinputInterKeyUsec =
+            deps_.bsRewriteUinputInterKeyUsec
+                ? deps_.bsRewriteUinputInterKeyUsec()
+                : 1500;
+        constexpr uint64_t kBrowserX11CommitSlackUsec = 5000;
+        constexpr uint64_t kDeltaAckTimeoutUsec = 200000;
+        constexpr uint64_t kDeltaLateBackspaceTimeoutUsec = 200000;
+        auto *loop = deps_.instance ? &deps_.instance->eventLoop() : nullptr;
+        auto &deltaState = state.delta;
+        state.browser.clear();
+
+        auto stateFor = [this](fcitx::InputContext *ic2) -> OpenKeyState * {
+            if (!ic2 || !deps_.factory) {
+                return nullptr;
+            }
+            return ic2->propertyFor(deps_.factory);
+        };
+
+        auto clearWordState = [&deltaState]() {
+            deltaState.clear();
+        };
+
+        auto drainPendingKeys = [this, icRef, lifetimeWeak, stateFor]() {
+            if (lifetimeWeak.expired()) {
+                return;
+            }
+            auto *ic2 = icRef.get();
+            if (!ic2) {
+                return;
+            }
+            auto *st = stateFor(ic2);
+            if (!st || st->delta.pendingKeys.empty()) {
+                return;
+            }
+            auto keys = std::move(st->delta.pendingKeys);
+            st->delta.pendingKeys.clear();
+            for (const auto &k : keys) {
+                fcitx::KeyEvent synthetic(ic2, k, false, 0);
+                const bool handled = handleKey(ic2, synthetic, *st);
+                if (!handled && !synthetic.accepted()) {
+                    ic2->forwardKey(k);
+                }
+            }
+        };
+
+        auto scheduleDrainPendingKeys =
+            [icRef, lifetimeWeak, loop, stateFor,
+             drainPendingKeys](DeltaRewriteState &deltaState2) {
+                deltaState2.drainPendingTimer.reset();
+                if (!loop) {
+                    drainPendingKeys();
+                    return;
+                }
+                const uint64_t deadline = fcitx::now(CLOCK_MONOTONIC) + 1;
+                deltaState2.drainPendingTimer = loop->addTimeEvent(
+                    CLOCK_MONOTONIC, deadline, 0,
+                    [icRef, lifetimeWeak, stateFor,
+                     drainPendingKeys](fcitx::EventSourceTime *, uint64_t) {
+                        if (lifetimeWeak.expired()) {
+                            return false;
+                        }
+                        auto *ic2 = icRef.get();
+                        if (!ic2) {
+                            return false;
+                        }
+                        auto *st = stateFor(ic2);
+                        if (!st) {
+                            return false;
+                        }
+                        auto _timer = std::move(st->delta.drainPendingTimer);
+                        drainPendingKeys();
+                        return false;
+                    });
+                if (deltaState2.drainPendingTimer) {
+                    deltaState2.drainPendingTimer->setOneShot();
+                    return;
+                }
+                drainPendingKeys();
+            };
+
+        auto scheduleLateBudgetTimeoutDrain =
+            [icRef, lifetimeWeak, loop, stateFor,
+             scheduleDrainPendingKeys](DeltaRewriteState &deltaState2) {
+                if (deltaState2.lateBackspaceBudget == 0) {
+                    scheduleDrainPendingKeys(deltaState2);
+                    return;
+                }
+                deltaState2.lateBackspaceTimeoutTimer.reset();
+                if (!loop) {
+                    deltaState2.lateBackspaceBudget = 0;
+                    scheduleDrainPendingKeys(deltaState2);
+                    return;
+                }
+                const uint64_t deadline =
+                    fcitx::now(CLOCK_MONOTONIC) +
+                    kDeltaLateBackspaceTimeoutUsec;
+                deltaState2.lateBackspaceTimeoutTimer = loop->addTimeEvent(
+                    CLOCK_MONOTONIC, deadline, 0,
+                    [icRef, lifetimeWeak, stateFor,
+                     scheduleDrainPendingKeys](fcitx::EventSourceTime *,
+                                              uint64_t) {
+                        if (lifetimeWeak.expired()) {
+                            return false;
+                        }
+                        auto *ic3 = icRef.get();
+                        if (!ic3) {
+                            return false;
+                        }
+                        auto *st3 = stateFor(ic3);
+                        if (!st3) {
+                            return false;
+                        }
+                        auto _timer =
+                            std::move(st3->delta.lateBackspaceTimeoutTimer);
+                        if (st3->delta.lateBackspaceBudget > 0) {
+                            if (st3->delta.expectedBackspaces > 0 ||
+                                st3->delta.seenBackspaces > 0) {
+                                FCITX_INFO()
+                                    << "openkey: delta late-bs timeout"
+                                    << " budget="
+                                    << st3->delta.lateBackspaceBudget;
+                            }
+                            st3->delta.lateBackspaceBudget = 0;
+                        }
+                        scheduleDrainPendingKeys(st3->delta);
+                        return false;
+                    });
+                if (deltaState2.lateBackspaceTimeoutTimer) {
+                    deltaState2.lateBackspaceTimeoutTimer->setOneShot();
+                    return;
+                }
+                deltaState2.lateBackspaceBudget = 0;
+                scheduleDrainPendingKeys(deltaState2);
+            };
+
+        auto finishPendingBackspaceCommit =
+            [icRef, lifetimeWeak, stateFor, drainPendingKeys]() {
+                if (lifetimeWeak.expired()) {
+                    return;
+                }
+                auto *ic2 = icRef.get();
+                if (!ic2) {
+                    return;
+                }
+                auto *st = stateFor(ic2);
+                if (!st) {
+                    return;
+                }
+
+                auto &deltaState2 = st->delta;
+                const std::string commitText =
+                    std::move(deltaState2.pendingConvertedText);
+                const std::string shownAfter =
+                    std::move(deltaState2.pendingShownTextAfterCommit);
+                deltaState2.commitTimer.reset();
+                deltaState2.pendingConvertedText.clear();
+                deltaState2.pendingShownTextAfterCommit.clear();
+
+                if (!commitText.empty()) {
+                    ic2->commitString(commitText);
+                }
+                deltaState2.shownText = shownAfter;
+                deltaState2.rewriteLock = false;
+                deltaState2.waitingBackspaceAck = false;
+                deltaState2.expectedBackspaces = 0;
+                deltaState2.seenBackspaces = 0;
+                deltaState2.ackTimeoutTimer.reset();
+
+                drainPendingKeys();
+            };
+
+        auto scheduleCommitAfterBackspace =
+            [icRef, lifetimeWeak, loop, stateFor, &deltaState,
+             scheduleLateBudgetTimeoutDrain,
+             finishPendingBackspaceCommit](uint64_t delayUsec) {
+                deltaState.commitTimer.reset();
+                if (!loop) {
+                    const int remainingBackspaces =
+                        std::max(0, deltaState.expectedBackspaces -
+                                        deltaState.seenBackspaces);
+                    finishPendingBackspaceCommit();
+                    deltaState.lateBackspaceBudget = remainingBackspaces;
+                    scheduleLateBudgetTimeoutDrain(deltaState);
+                    return;
+                }
+                const uint64_t deadline = fcitx::now(CLOCK_MONOTONIC) + delayUsec;
+                deltaState.commitTimer = loop->addTimeEvent(
+                    CLOCK_MONOTONIC, deadline, 0,
+                    [icRef, lifetimeWeak, stateFor,
+                     scheduleLateBudgetTimeoutDrain,
+                     finishPendingBackspaceCommit](fcitx::EventSourceTime *,
+                                                   uint64_t) {
+                        if (lifetimeWeak.expired()) {
+                            return false;
+                        }
+                        auto *ic2 = icRef.get();
+                        if (!ic2) {
+                            return false;
+                        }
+                        auto *st = stateFor(ic2);
+                        if (!st) {
+                            return false;
+                        }
+                        const int remainingBackspaces =
+                            std::max(0, st->delta.expectedBackspaces -
+                                            st->delta.seenBackspaces);
+                        auto _timer = std::move(st->delta.commitTimer);
+                        finishPendingBackspaceCommit();
+                        st->delta.lateBackspaceBudget = remainingBackspaces;
+                        scheduleLateBudgetTimeoutDrain(st->delta);
+                        return false;
+                    });
+                if (deltaState.commitTimer) {
+                    deltaState.commitTimer->setOneShot();
+                }
+            };
+
+        auto scheduleAckTimeout =
+            [this, icRef, lifetimeWeak, loop, stateFor, &deltaState,
+             scheduleCommitAfterBackspace]() {
+                deltaState.ackTimeoutTimer.reset();
+                if (!loop) {
+                    return;
+                }
+                const uint64_t deadline =
+                    fcitx::now(CLOCK_MONOTONIC) + kDeltaAckTimeoutUsec;
+                deltaState.ackTimeoutTimer = loop->addTimeEvent(
+                    CLOCK_MONOTONIC, deadline, 0,
+                    [this, icRef, lifetimeWeak, stateFor,
+                     scheduleCommitAfterBackspace](fcitx::EventSourceTime *,
+                                                  uint64_t) {
+                        if (lifetimeWeak.expired()) {
+                            return false;
+                        }
+                        auto *ic2 = icRef.get();
+                        if (!ic2) {
+                            return false;
+                        }
+                        auto *st = stateFor(ic2);
+                        if (!st) {
+                            return false;
+                        }
+                        auto _timer = std::move(st->delta.ackTimeoutTimer);
+                        if (!st->delta.waitingBackspaceAck) {
+                            return false;
+                        }
+                        FCITX_INFO() << "openkey: bs-x11 ack timeout"
+                                     << " program=" << st->program
+                                     << " seen=" << st->delta.seenBackspaces
+                                     << " expected="
+                                     << st->delta.expectedBackspaces;
+                        const uint64_t extraUsec =
+                            deps_.bsRewriteCommitExtraUsec
+                                ? deps_.bsRewriteCommitExtraUsec()
+                                : 0;
+                        scheduleCommitAfterBackspace(
+                            extraUsec + kBrowserX11CommitSlackUsec);
+                        return false;
+                    });
+                if (deltaState.ackTimeoutTimer) {
+                    deltaState.ackTimeoutTimer->setOneShot();
+                }
+            };
+
+        auto applyWordDelta = [&, this](const std::string &newWord,
+                                        char asciiChar,
+                                        const char *reason) -> bool {
+            if (!deps_.backspaceInjector) {
+                return false;
+            }
+            if (deltaState.rewriteLock) {
+                deltaState.pendingKeys.push_back(key);
+                event.filterAndAccept();
+                return true;
+            }
+            if (!fcitx::utf8::validate(deltaState.shownText) ||
+                !fcitx::utf8::validate(newWord)) {
+                clearWordState();
+                return false;
+            }
+
+            const std::string oldShown = deltaState.shownText;
+            const std::string rawAppend = oldShown + asciiChar;
+
+            const std::size_t prefixLen =
+                commonPrefixBytesUTF8Boundary(deltaState.shownText, newWord);
+            unsigned int deleteCount =
+                utf8CharCount(deltaState.shownText.substr(prefixLen));
+            std::string commitText = newWord.substr(prefixLen);
+            if (deleteCount > 128) {
+                deleteCount = utf8CharCount(deltaState.shownText);
+                commitText = newWord;
+            }
+
+            if (debug) {
+                FCITX_INFO() << "openkey: bs-x11 program=" << state.program
+                             << " reason=" << reason
+                             << " from=" << deltaState.shownText
+                             << " to=" << newWord
+                             << " delete=" << deleteCount
+                             << " commit=" << commitText;
+            }
+
+            if (deleteCount == 0) {
+                if (!commitText.empty()) {
+                    ic->commitString(commitText);
+                }
+                deltaState.shownText = newWord;
+                deltaState.hasRewrittenCurrentWord =
+                    deltaState.hasRewrittenCurrentWord ||
+                    (newWord != rawAppend);
+                event.filterAndAccept();
+                return true;
+            }
+
+            const std::string programForInjector = state.program;
+            const int ackBackspaceCount =
+                static_cast<int>(deleteCount) + 1;
+            const auto method =
+                deps_.backspaceInjector->sendBackspacesUinputOnly(
+                    ic, programForInjector, ackBackspaceCount, debug,
+                    uinputInterKeyUsec);
+
+            if (method == BackspaceInjector::Method::Uinput) {
+                deltaState.rewriteLock = true;
+                deltaState.waitingBackspaceAck = true;
+                deltaState.expectedBackspaces = ackBackspaceCount;
+                deltaState.seenBackspaces = 0;
+                deltaState.pendingConvertedText = std::move(commitText);
+                deltaState.pendingShownTextAfterCommit = newWord;
+                event.filterAndAccept();
+                scheduleAckTimeout();
+                return true;
+            }
+
+            clearWordState();
+            return false;
+        };
+
+        if (deltaState.waitingBackspaceAck) {
+            if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
+                key.check(FcitxKey_ISO_Enter) || key.isCursorMove() ||
+                key.check(FcitxKey_Delete) || key.check(FcitxKey_Tab) ||
+                key.check(FcitxKey_Escape)) {
+                finishPendingBackspaceCommit();
+                deltaState.pendingKeys.clear();
+                return false;
+            }
+            if (key.check(FcitxKey_BackSpace) && !hasCtrlAltSuperMeta(key)) {
+                deltaState.seenBackspaces++;
+                if (deltaState.seenBackspaces < deltaState.expectedBackspaces) {
+                    return false;
+                }
+
+                deltaState.ackTimeoutTimer.reset();
+                deltaState.waitingBackspaceAck = false;
+                const uint64_t extraUsec = deps_.bsRewriteCommitExtraUsec
+                                               ? deps_.bsRewriteCommitExtraUsec()
+                                               : 0;
+                scheduleCommitAfterBackspace(
+                    extraUsec + kBrowserX11CommitSlackUsec);
+                event.filterAndAccept();
+                return true;
+            }
+
+            deltaState.pendingKeys.push_back(key);
+            event.filterAndAccept();
+            return true;
+        }
+
+        if (deltaState.lateBackspaceBudget > 0) {
+            if (key.check(FcitxKey_BackSpace) && !hasCtrlAltSuperMeta(key)) {
+                deltaState.lateBackspaceBudget--;
+                event.filterAndAccept();
+                if (deltaState.lateBackspaceBudget == 0) {
+                    deltaState.lateBackspaceTimeoutTimer.reset();
+                    scheduleDrainPendingKeys(deltaState);
+                }
+                return true;
+            }
+            deltaState.pendingKeys.push_back(key);
+            event.filterAndAccept();
+            return true;
+        }
+
+        if (deltaState.rewriteLock) {
+            deltaState.pendingKeys.push_back(key);
+            event.filterAndAccept();
+            return true;
+        }
+
+        if (key.isCursorMove() || key.check(FcitxKey_Delete)) {
+            clearWordState();
+            return false;
+        }
+
+        if (key.check(FcitxKey_Escape)) {
+            clearWordState();
+            return false;
+        }
+
+        if (key.check(FcitxKey_BackSpace)) {
+            if (deltaState.shownText.empty()) {
+                return false;
+            }
+            if (!deltaState.hasRewrittenCurrentWord) {
                 clearWordState();
                 return false;
             }
@@ -991,16 +1599,14 @@ const std::string programForInjector = state.program;
                 return false;
             }
             event.filterAndAccept();
-            state.shownText = utf8DropLastN(state.shownText, 1);
+            deltaState.shownText = utf8DropLastN(deltaState.shownText, 1);
             return true;
         }
 
-        // Printable ASCII path.
         const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
         if (uni >= 0x20 && uni <= 0x7E) {
             const char c = static_cast<char>(uni);
 
-            // Boundary keys: end current word and let application handle it.
             if (isBoundaryASCII(c) || key.check(FcitxKey_Return) ||
                 key.check(FcitxKey_KP_Enter) || key.check(FcitxKey_ISO_Enter) ||
                 key.check(FcitxKey_Tab)) {
@@ -1008,33 +1614,511 @@ const std::string programForInjector = state.program;
                 return false;
             }
 
-	        // Word characters: apply OpenKey changes immediately via delta.
-	        if (isComposingASCII(c)) {
-	            if (!adapterShared) {
-	                return false;
-	            }
+            if (isComposingASCII(c)) {
+                if (!adapterShared) {
+                    return false;
+                }
                 adapterShared->setCodeTable(state.codeTable);
-	            const auto r =
-	                adapterShared->processAsciiKey(state.shownText, c);
-	            if (!r.handled) {
-	                return false;
-	            }
-                state.lastPhysicalKeyUsec = nowUsec;
+                const auto r =
+                    adapterShared->processAsciiKey(deltaState.shownText, c);
+                if (!r.handled) {
+                    return false;
+                }
                 return applyWordDelta(r.newWord, c, "ascii");
             }
 
-            // Other printable ASCII: treat as boundary of current word.
             clearWordState();
             return false;
         }
 
-        // Any other key: end composing state, let application handle.
         clearWordState();
         return false;
     }
 
 private:
-    ModeDeps deps_;
+    DeltaModeDeps deps_;
+};
+
+class BackspaceRewriteModeHandler final : public InputModeHandler {
+public:
+    explicit BackspaceRewriteModeHandler(DeltaModeDeps deps)
+        : deps_(std::move(deps)) {}
+
+    bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
+                   OpenKeyState &state) override {
+        auto key = event.key().normalize();
+        if (event.isRelease()) {
+            return false;
+        }
+        if (hasCtrlAltSuperMeta(key)) {
+            return false;
+        }
+
+        const auto icRef = ic->watch();
+        const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
+        const auto adapterShared = deps_.adapter;
+        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
+        const uint64_t uinputInterKeyUsec =
+            deps_.bsRewriteUinputInterKeyUsec
+                ? deps_.bsRewriteUinputInterKeyUsec()
+                : 1500;
+        constexpr uint64_t kDeltaAckTimeoutUsec = 200000;
+        constexpr uint64_t kDeltaLateBackspaceTimeoutUsec = 200000;
+        auto *loop = deps_.instance ? &deps_.instance->eventLoop() : nullptr;
+        auto &deltaState = state.delta;
+
+        auto stateFor = [this](fcitx::InputContext *ic2) -> OpenKeyState * {
+            if (!ic2 || !deps_.factory) {
+                return nullptr;
+            }
+            return ic2->propertyFor(deps_.factory);
+        };
+
+        auto clearWordState = [&deltaState]() {
+            deltaState.clear();
+        };
+
+        auto drainPendingKeys = [this, icRef, lifetimeWeak, stateFor]() {
+            if (lifetimeWeak.expired()) {
+                return;
+            }
+            auto *ic2 = icRef.get();
+            if (!ic2) {
+                return;
+            }
+            auto *st = stateFor(ic2);
+            if (!st || st->delta.pendingKeys.empty()) {
+                return;
+            }
+            auto keys = std::move(st->delta.pendingKeys);
+            st->delta.pendingKeys.clear();
+            for (const auto &k : keys) {
+                fcitx::KeyEvent synthetic(ic2, k, false, 0);
+                const bool handled = handleKey(ic2, synthetic, *st);
+                if (!handled && !synthetic.accepted()) {
+                    ic2->forwardKey(k);
+                }
+            }
+        };
+
+        auto scheduleDrainPendingKeys =
+            [icRef, lifetimeWeak, loop, stateFor,
+             drainPendingKeys](DeltaRewriteState &deltaState2) {
+                deltaState2.drainPendingTimer.reset();
+                if (!loop) {
+                    drainPendingKeys();
+                    return;
+                }
+                const uint64_t deadline = fcitx::now(CLOCK_MONOTONIC) + 1;
+                deltaState2.drainPendingTimer = loop->addTimeEvent(
+                    CLOCK_MONOTONIC, deadline, 0,
+                    [icRef, lifetimeWeak, stateFor,
+                     drainPendingKeys](fcitx::EventSourceTime *, uint64_t) {
+                        if (lifetimeWeak.expired()) {
+                            return false;
+                        }
+                        auto *ic2 = icRef.get();
+                        if (!ic2) {
+                            return false;
+                        }
+                        auto *st = stateFor(ic2);
+                        if (!st) {
+                            return false;
+                        }
+                        auto _timer = std::move(st->delta.drainPendingTimer);
+                        drainPendingKeys();
+                        return false;
+                    });
+                if (deltaState2.drainPendingTimer) {
+                    deltaState2.drainPendingTimer->setOneShot();
+                    return;
+                }
+                drainPendingKeys();
+            };
+
+        auto scheduleLateBudgetTimeoutDrain =
+            [icRef, lifetimeWeak, loop, stateFor,
+             scheduleDrainPendingKeys](DeltaRewriteState &deltaState2) {
+                if (deltaState2.lateBackspaceBudget == 0) {
+                    scheduleDrainPendingKeys(deltaState2);
+                    return;
+                }
+                deltaState2.lateBackspaceTimeoutTimer.reset();
+                if (!loop) {
+                    deltaState2.lateBackspaceBudget = 0;
+                    scheduleDrainPendingKeys(deltaState2);
+                    return;
+                }
+                const uint64_t deadline =
+                    fcitx::now(CLOCK_MONOTONIC) +
+                    kDeltaLateBackspaceTimeoutUsec;
+                deltaState2.lateBackspaceTimeoutTimer = loop->addTimeEvent(
+                    CLOCK_MONOTONIC, deadline, 0,
+                    [icRef, lifetimeWeak, stateFor,
+                     scheduleDrainPendingKeys](fcitx::EventSourceTime *,
+                                              uint64_t) {
+                        if (lifetimeWeak.expired()) {
+                            return false;
+                        }
+                        auto *ic3 = icRef.get();
+                        if (!ic3) {
+                            return false;
+                        }
+                        auto *st3 = stateFor(ic3);
+                        if (!st3) {
+                            return false;
+                        }
+                        auto _timer =
+                            std::move(st3->delta.lateBackspaceTimeoutTimer);
+                        if (st3->delta.lateBackspaceBudget > 0) {
+                            FCITX_INFO()
+                                << "openkey: bs-delta late-bs timeout"
+                                << " program=" << st3->program
+                                << " budget="
+                                << st3->delta.lateBackspaceBudget;
+                            st3->delta.lateBackspaceBudget = 0;
+                        }
+                        scheduleDrainPendingKeys(st3->delta);
+                        return false;
+                    });
+                if (deltaState2.lateBackspaceTimeoutTimer) {
+                    deltaState2.lateBackspaceTimeoutTimer->setOneShot();
+                    return;
+                }
+                deltaState2.lateBackspaceBudget = 0;
+                scheduleDrainPendingKeys(deltaState2);
+            };
+
+        auto finishPendingBackspaceCommit =
+            [icRef, lifetimeWeak, stateFor, drainPendingKeys]() {
+                if (lifetimeWeak.expired()) {
+                    return;
+                }
+                auto *ic2 = icRef.get();
+                if (!ic2) {
+                    return;
+                }
+                auto *st = stateFor(ic2);
+                if (!st) {
+                    return;
+                }
+
+                auto &deltaState2 = st->delta;
+                const std::string commitText =
+                    std::move(deltaState2.pendingConvertedText);
+                const std::string shownAfter =
+                    std::move(deltaState2.pendingShownTextAfterCommit);
+                deltaState2.commitTimer.reset();
+                deltaState2.pendingConvertedText.clear();
+                deltaState2.pendingShownTextAfterCommit.clear();
+
+                if (!commitText.empty()) {
+                    ic2->commitString(commitText);
+                }
+                deltaState2.shownText = shownAfter;
+                deltaState2.rewriteLock = false;
+                deltaState2.waitingBackspaceAck = false;
+                deltaState2.expectedBackspaces = 0;
+                deltaState2.seenBackspaces = 0;
+                deltaState2.ackTimeoutTimer.reset();
+
+                drainPendingKeys();
+            };
+
+        auto scheduleCommitAfterBackspace =
+            [icRef, lifetimeWeak, loop, stateFor, &deltaState,
+             scheduleLateBudgetTimeoutDrain,
+             finishPendingBackspaceCommit](uint64_t delayUsec) {
+                deltaState.commitTimer.reset();
+                if (!loop) {
+                    const int remainingBackspaces =
+                        std::max(0, deltaState.expectedBackspaces -
+                                        deltaState.seenBackspaces);
+                    finishPendingBackspaceCommit();
+                    deltaState.lateBackspaceBudget = remainingBackspaces;
+                    scheduleLateBudgetTimeoutDrain(deltaState);
+                    return;
+                }
+                const uint64_t deadline = fcitx::now(CLOCK_MONOTONIC) + delayUsec;
+                deltaState.commitTimer = loop->addTimeEvent(
+                    CLOCK_MONOTONIC, deadline, 0,
+                    [icRef, lifetimeWeak, stateFor,
+                     scheduleLateBudgetTimeoutDrain,
+                     finishPendingBackspaceCommit](fcitx::EventSourceTime *,
+                                                   uint64_t) {
+                        if (lifetimeWeak.expired()) {
+                            return false;
+                        }
+                        auto *ic2 = icRef.get();
+                        if (!ic2) {
+                            return false;
+                        }
+                        auto *st = stateFor(ic2);
+                        if (!st) {
+                            return false;
+                        }
+                        const int remainingBackspaces =
+                            std::max(0, st->delta.expectedBackspaces -
+                                            st->delta.seenBackspaces);
+                        auto _timer = std::move(st->delta.commitTimer);
+                        finishPendingBackspaceCommit();
+                        st->delta.lateBackspaceBudget = remainingBackspaces;
+                        scheduleLateBudgetTimeoutDrain(st->delta);
+                        return false;
+                    });
+                if (deltaState.commitTimer) {
+                    deltaState.commitTimer->setOneShot();
+                }
+            };
+
+        auto scheduleAckTimeout =
+            [this, icRef, lifetimeWeak, loop, stateFor, &deltaState,
+             scheduleCommitAfterBackspace]() {
+                deltaState.ackTimeoutTimer.reset();
+                if (!loop) {
+                    return;
+                }
+                const uint64_t deadline =
+                    fcitx::now(CLOCK_MONOTONIC) + kDeltaAckTimeoutUsec;
+                deltaState.ackTimeoutTimer = loop->addTimeEvent(
+                    CLOCK_MONOTONIC, deadline, 0,
+                    [this, icRef, lifetimeWeak, stateFor,
+                     scheduleCommitAfterBackspace](fcitx::EventSourceTime *,
+                                                  uint64_t) {
+                        if (lifetimeWeak.expired()) {
+                            return false;
+                        }
+                        auto *ic2 = icRef.get();
+                        if (!ic2) {
+                            return false;
+                        }
+                        auto *st = stateFor(ic2);
+                        if (!st) {
+                            return false;
+                        }
+                        auto _timer = std::move(st->delta.ackTimeoutTimer);
+                        if (!st->delta.waitingBackspaceAck) {
+                            return false;
+                        }
+                        FCITX_INFO() << "openkey: bs-delta ack timeout"
+                                     << " program=" << st->program
+                                     << " seen=" << st->delta.seenBackspaces
+                                     << " expected="
+                                     << st->delta.expectedBackspaces;
+                        const uint64_t extraUsec =
+                            deps_.bsRewriteCommitExtraUsec
+                                ? deps_.bsRewriteCommitExtraUsec()
+                                : 0;
+                        scheduleCommitAfterBackspace(extraUsec);
+                        return false;
+                    });
+                if (deltaState.ackTimeoutTimer) {
+                    deltaState.ackTimeoutTimer->setOneShot();
+                }
+            };
+
+        auto applyWordDelta = [&, this](const std::string &newWord,
+                                        char asciiChar,
+                                        const char *reason) -> bool {
+            if (!deps_.backspaceInjector) {
+                return false;
+            }
+            if (deltaState.rewriteLock) {
+                deltaState.pendingKeys.push_back(key);
+                event.filterAndAccept();
+                return true;
+            }
+            if (!fcitx::utf8::validate(deltaState.shownText) ||
+                !fcitx::utf8::validate(newWord)) {
+                clearWordState();
+                return false;
+            }
+
+            const std::string oldShown = deltaState.shownText;
+            const std::string rawAppend = oldShown + asciiChar;
+
+            const std::size_t prefixLen =
+                commonPrefixBytesUTF8Boundary(deltaState.shownText, newWord);
+            unsigned int deleteCount =
+                utf8CharCount(deltaState.shownText.substr(prefixLen));
+            std::string commitText = newWord.substr(prefixLen);
+            if (deleteCount > 128) {
+                deleteCount = utf8CharCount(deltaState.shownText);
+                commitText = newWord;
+            }
+
+            if (debug) {
+                FCITX_INFO() << "openkey: bs-delta program=" << state.program
+                             << " reason=" << reason
+                             << " from=" << deltaState.shownText
+                             << " to=" << newWord
+                             << " delete=" << deleteCount
+                             << " commit=" << commitText;
+            }
+
+            if (deleteCount == 0) {
+                if (!commitText.empty()) {
+                    ic->commitString(commitText);
+                }
+                deltaState.shownText = newWord;
+                deltaState.hasRewrittenCurrentWord =
+                    deltaState.hasRewrittenCurrentWord ||
+                    (newWord != rawAppend);
+                event.filterAndAccept();
+                return true;
+            }
+
+            const std::string programForInjector = state.program;
+            const auto method = deps_.backspaceInjector->sendBackspaces(
+                ic, programForInjector, static_cast<int>(deleteCount), debug,
+                uinputInterKeyUsec);
+
+            if (method == BackspaceInjector::Method::DeleteSurroundingText) {
+                if (!commitText.empty()) {
+                    ic->commitString(commitText);
+                }
+                deltaState.shownText = newWord;
+                deltaState.hasRewrittenCurrentWord =
+                    deltaState.hasRewrittenCurrentWord ||
+                    (newWord != rawAppend);
+                event.filterAndAccept();
+                return true;
+            }
+
+            if (method == BackspaceInjector::Method::Uinput) {
+                deps_.backspaceInjector->sendBackspaces(
+                    ic, programForInjector, 1, debug, uinputInterKeyUsec);
+
+                deltaState.rewriteLock = true;
+                deltaState.waitingBackspaceAck = true;
+                deltaState.expectedBackspaces =
+                    static_cast<int>(deleteCount) + 1;
+                deltaState.seenBackspaces = 0;
+                deltaState.pendingConvertedText = std::move(commitText);
+                deltaState.pendingShownTextAfterCommit = newWord;
+                event.filterAndAccept();
+                scheduleAckTimeout();
+                return true;
+            }
+
+            clearWordState();
+            return false;
+        };
+
+        if (deltaState.waitingBackspaceAck) {
+            if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
+                key.check(FcitxKey_ISO_Enter) || key.isCursorMove() ||
+                key.check(FcitxKey_Delete) || key.check(FcitxKey_Tab) ||
+                key.check(FcitxKey_Escape)) {
+                finishPendingBackspaceCommit();
+                deltaState.pendingKeys.clear();
+                return false;
+            }
+            if (key.check(FcitxKey_BackSpace) && !hasCtrlAltSuperMeta(key)) {
+                deltaState.seenBackspaces++;
+                if (deltaState.seenBackspaces < deltaState.expectedBackspaces) {
+                    return false;
+                }
+
+                deltaState.ackTimeoutTimer.reset();
+                event.filterAndAccept();
+                const uint64_t extraUsec = deps_.bsRewriteCommitExtraUsec
+                                               ? deps_.bsRewriteCommitExtraUsec()
+                                               : 0;
+                scheduleCommitAfterBackspace(extraUsec);
+                return true;
+            }
+
+            deltaState.pendingKeys.push_back(key);
+            event.filterAndAccept();
+            return true;
+        }
+
+        if (deltaState.lateBackspaceBudget > 0) {
+            if (key.check(FcitxKey_BackSpace) && !hasCtrlAltSuperMeta(key)) {
+                deltaState.lateBackspaceBudget--;
+                event.filterAndAccept();
+                if (deltaState.lateBackspaceBudget == 0) {
+                    deltaState.lateBackspaceTimeoutTimer.reset();
+                    scheduleDrainPendingKeys(deltaState);
+                }
+                return true;
+            }
+            deltaState.pendingKeys.push_back(key);
+            event.filterAndAccept();
+            return true;
+        }
+
+        if (deltaState.rewriteLock) {
+            deltaState.pendingKeys.push_back(key);
+            event.filterAndAccept();
+            return true;
+        }
+
+        if (key.isCursorMove() || key.check(FcitxKey_Delete)) {
+            clearWordState();
+            return false;
+        }
+
+        if (key.check(FcitxKey_Escape)) {
+            clearWordState();
+            return false;
+        }
+
+        if (key.check(FcitxKey_BackSpace)) {
+            if (deltaState.shownText.empty()) {
+                return false;
+            }
+            if (!deltaState.hasRewrittenCurrentWord) {
+                clearWordState();
+                return false;
+            }
+            const std::string programForInjector = state.program;
+            const auto method = deps_.backspaceInjector->sendBackspaces(
+                ic, programForInjector, 1, debug, uinputInterKeyUsec);
+            if (method != BackspaceInjector::Method::Uinput) {
+                clearWordState();
+                return false;
+            }
+            event.filterAndAccept();
+            deltaState.shownText = utf8DropLastN(deltaState.shownText, 1);
+            return true;
+        }
+
+        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
+        if (uni >= 0x20 && uni <= 0x7E) {
+            const char c = static_cast<char>(uni);
+
+            if (isBoundaryASCII(c) || key.check(FcitxKey_Return) ||
+                key.check(FcitxKey_KP_Enter) || key.check(FcitxKey_ISO_Enter) ||
+                key.check(FcitxKey_Tab)) {
+                clearWordState();
+                return false;
+            }
+
+            if (isComposingASCII(c)) {
+                if (!adapterShared) {
+                    return false;
+                }
+                adapterShared->setCodeTable(state.codeTable);
+                const auto r =
+                    adapterShared->processAsciiKey(deltaState.shownText, c);
+                if (!r.handled) {
+                    return false;
+                }
+                return applyWordDelta(r.newWord, c, "ascii");
+            }
+
+            clearWordState();
+            return false;
+        }
+
+        clearWordState();
+        return false;
+    }
+
+private:
+    DeltaModeDeps deps_;
 };
 
 } // namespace
@@ -1046,27 +2130,58 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     focusedAppBridge_ = std::make_unique<FocusedAppBridge>(
         instance_ ? &instance_->eventLoop() : nullptr,
         [this]() { return debugEnabled(); });
-    ModeDeps deps;
-    deps.instance = instance_;
-    deps.factory = &factory_;
-    deps.adapter = adapter_;
-    deps.backspaceInjector = &g_backspaceInjector;
-    deps.lifetimeWeak = lifetime_;
-    deps.debugEnabled = [this]() { return debugEnabled(); };
-    deps.bsRewriteCommitExtraUsec = [this]() -> uint64_t {
-        return static_cast<uint64_t>(
-            std::max(0, config_.bsRewriteCommitExtraUsec.value()));
-    };
-    deps.bsRewriteCommitCapUsec = [this]() -> uint64_t {
-        return static_cast<uint64_t>(
-            std::max(0, config_.bsRewriteCommitCapUsec.value()));
-    };
-    deps.bsRewriteUinputInterKeyUsec = [this]() -> uint64_t {
+    BrowserModeDeps browserDeps;
+    browserDeps.instance = instance_;
+    browserDeps.factory = &factory_;
+    browserDeps.adapter = adapter_;
+    browserDeps.backspaceInjector = &g_backspaceInjector;
+    browserDeps.lifetimeWeak = lifetime_;
+    browserDeps.debugEnabled = [this]() { return debugEnabled(); };
+    browserDeps.bsRewriteUinputInterKeyUsec = [this]() -> uint64_t {
         return static_cast<uint64_t>(
             std::max(0, config_.bsRewriteUinputInterKeyUsec.value()));
     };
+    browserDeps.browserRewriteCommitDelayUsec = [this]() -> uint64_t {
+        return static_cast<uint64_t>(
+            std::max(0, config_.browserRewriteCommitDelayUsec.value()));
+    };
+
+    DeltaModeDeps deltaDeps;
+    deltaDeps.instance = instance_;
+    deltaDeps.factory = &factory_;
+    deltaDeps.adapter = adapter_;
+    deltaDeps.backspaceInjector = &g_backspaceInjector;
+    deltaDeps.lifetimeWeak = lifetime_;
+    deltaDeps.debugEnabled = [this]() { return debugEnabled(); };
+    deltaDeps.bsRewriteCommitExtraUsec = [this]() -> uint64_t {
+        return static_cast<uint64_t>(
+            std::max(0, config_.bsRewriteCommitExtraUsec.value()));
+    };
+    deltaDeps.bsRewriteUinputInterKeyUsec = [this]() -> uint64_t {
+        return static_cast<uint64_t>(
+            std::max(0, config_.bsRewriteUinputInterKeyUsec.value()));
+    };
+    browserRewriteHandler_ =
+        std::make_unique<BrowserModeHandler>(std::move(browserDeps));
+    DeltaModeDeps browserX11Deps;
+    browserX11Deps.instance = instance_;
+    browserX11Deps.factory = &factory_;
+    browserX11Deps.adapter = adapter_;
+    browserX11Deps.backspaceInjector = &g_backspaceInjector;
+    browserX11Deps.lifetimeWeak = lifetime_;
+    browserX11Deps.debugEnabled = [this]() { return debugEnabled(); };
+    browserX11Deps.bsRewriteCommitExtraUsec = [this]() -> uint64_t {
+        return static_cast<uint64_t>(
+            std::max(0, config_.bsRewriteCommitExtraUsec.value()));
+    };
+    browserX11Deps.bsRewriteUinputInterKeyUsec = [this]() -> uint64_t {
+        return static_cast<uint64_t>(
+            std::max(0, config_.bsRewriteUinputInterKeyUsec.value()));
+    };
+    browserX11RewriteHandler_ =
+        std::make_unique<BrowserX11ModeHandler>(std::move(browserX11Deps));
     backspaceRewriteHandler_ =
-        std::make_unique<BackspaceRewriteModeHandler>(std::move(deps));
+        std::make_unique<BackspaceRewriteModeHandler>(std::move(deltaDeps));
     reloadConfig();
 
     // Warm up uinput ngay khi load để tránh delay lần đầu gõ
@@ -1101,6 +2216,10 @@ std::string OpenKeyEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
         switch (m) {
         case RuntimeMode::Auto:
             return "Auto";
+        case RuntimeMode::Browser:
+            return "Browser";
+        case RuntimeMode::BrowserX11:
+            return "Browser X11";
         case RuntimeMode::SurroundingText:
             return "Surrounding";
         case RuntimeMode::Preedit:
@@ -1130,6 +2249,10 @@ std::string OpenKeyEngine::subMode(const fcitx::InputMethodEntry &,
     switch (state->mode) {
     case RuntimeMode::Auto:
         return "Auto";
+    case RuntimeMode::Browser:
+        return "Browser";
+    case RuntimeMode::BrowserX11:
+        return "BrowserX11";
     case RuntimeMode::SurroundingText:
         return "Surrounding";
     case RuntimeMode::Preedit:
@@ -1256,18 +2379,8 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
                              fcitx::InputContextEvent &event) {
     auto *ic = event.inputContext();
     auto *state = stateFor(ic);
-    state->shownText.clear();
-    state->hasRewrittenCurrentWord = false;
-    state->rewriteLock = false;
-    state->waitingBackspaceAck = false;
-    state->expectedBackspaces = 0;
-    state->seenBackspaces = 0;
-    state->pendingKeys.clear();
-    state->rewriteTimer.reset();
-    state->commitTimer.reset();
-    state->pendingConvertedText.clear();
-    state->pendingShownTextAfterCommit.clear();
-    state->hasPendingBoundaryKey = false;
+    state->browser.clear();
+    state->delta.clear();
     state->composing.clear();
     state->macroBuffer.clear();
     state->rollbackWord.clear();
@@ -1301,18 +2414,8 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
                           fcitx::InputContextEvent &event) {
     auto *ic = event.inputContext();
     auto *state = stateFor(ic);
-    state->shownText.clear();
-    state->hasRewrittenCurrentWord = false;
-    state->rewriteLock = false;
-    state->waitingBackspaceAck = false;
-    state->expectedBackspaces = 0;
-    state->seenBackspaces = 0;
-    state->pendingKeys.clear();
-    state->rewriteTimer.reset();
-    state->commitTimer.reset();
-    state->pendingConvertedText.clear();
-    state->pendingShownTextAfterCommit.clear();
-    state->hasPendingBoundaryKey = false;
+    state->browser.clear();
+    state->delta.clear();
     state->composing.clear();
     state->macroBuffer.clear();
     state->rollbackWord.clear();
@@ -1329,17 +2432,36 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
     }
 
     const auto normalizedProgram = normalizedProgramName(s.program);
+    const bool browserDisabled = isX11Backend(ic);
+    const bool hideBrowserModes =
+        shouldHideBrowserModesForProgram(ic, s.program);
     auto it = appModeMap_.find(normalizedProgram);
     if (!normalizedProgram.empty() && it != appModeMap_.end() &&
         it->second != RuntimeMode::Auto) {
-        return it->second;
+        if (((it->second == RuntimeMode::Browser ||
+              it->second == RuntimeMode::BrowserX11) &&
+             hideBrowserModes) ||
+            (it->second == RuntimeMode::Browser && browserDisabled) ||
+            (it->second == RuntimeMode::BrowserX11 && !browserDisabled)) {
+            // Ignore backend-specific browser mode on the wrong backend and
+            // fall back to auto decision for this session.
+        } else {
+            return it->second;
+        }
     }
 
-    // Browsers are often fragile with surrounding-text/backspace rewrite.
-    // Force preedit for better UX.
-    if (isBrowserProgram(s.program) ||
-        (isWaylandBackend(ic) && s.program.empty())) {
-        const auto mode = RuntimeMode::Preedit;
+    // Browser backspace-rewrite is for Wayland browser quirks. On X11,
+    // browsers can drop commitString() after uinput backspace, so prefer
+    // preedit and avoid the browser transaction entirely.
+    if (shouldUsePreeditForX11Browser(ic, s.program)) {
+        return RuntimeMode::Preedit;
+    }
+
+    // Browser mode is backspace rewrite with a separate uinput+timer
+    // transaction, avoiding deleteSurroundingText entirely.
+    if (!browserDisabled && isWaylandBackend(ic) &&
+        isBrowserProgram(s.program)) {
+        const auto mode = RuntimeMode::Browser;
         if (writeBack && !normalizedProgram.empty()) {
             appModeMap_[normalizedProgram] = mode;
             persistAppModes();
@@ -1347,30 +2469,17 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
         return mode;
     }
 
-    const auto canUseSurroundingText = [&]() -> bool {
-        const auto &st = ic->surroundingText();
-        if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
-            return false;
-        }
-        if (!st.isValid() || st.cursor() != st.anchor()) {
-            return false;
-        }
-        if (!fcitx::utf8::validate(st.text())) {
-            return false;
-        }
-        if (st.cursor() > fcitx::utf8::length(st.text())) {
-            return false;
-        }
-        return true;
-    };
-
-    if (canUseSurroundingText()) {
+    if (hasReliableSurroundingText(ic)) {
         const auto mode = RuntimeMode::SurroundingText;
         if (writeBack && !normalizedProgram.empty()) {
             appModeMap_[normalizedProgram] = mode;
             persistAppModes();
         }
         return mode;
+    }
+
+    if (s.program.empty()) {
+        return RuntimeMode::Preedit;
     }
 
     const auto mode = RuntimeMode::BackspaceRewriteDelta;
@@ -1786,9 +2895,14 @@ bool OpenKeyEngine::handleSurroundingText(fcitx::InputContext *ic,
 bool OpenKeyEngine::handleBackspaceRewrite(fcitx::InputContext *ic,
                                           fcitx::KeyEvent &event,
                                           OpenKeyState &state) {
-    // Kept for compatibility during refactor; keyEvent() routes to the
-    // strategy handler instead of calling this directly.
-    if (backspaceRewriteHandler_) {
+    if (state.mode == RuntimeMode::Browser && browserRewriteHandler_) {
+        return browserRewriteHandler_->handleKey(ic, event, state);
+    }
+    if (state.mode == RuntimeMode::BrowserX11 && browserX11RewriteHandler_) {
+        return browserX11RewriteHandler_->handleKey(ic, event, state);
+    }
+    if (state.mode == RuntimeMode::BackspaceRewriteDelta &&
+        backspaceRewriteHandler_) {
         return backspaceRewriteHandler_->handleKey(ic, event, state);
     }
     return false;
@@ -1812,21 +2926,24 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         state->autoMode = state->mode;
         state->modeDecided = true;
     }
+    const bool browserDisabled = isX11Backend(ic);
+    if (browserDisabled && state->mode == RuntimeMode::Browser) {
+        state->browser.clear();
+        state->mode = decideMode(ic, *state, false);
+        state->autoMode = state->mode;
+        state->manualMode = false;
+    }
+    if (!browserDisabled && state->mode == RuntimeMode::BrowserX11) {
+        state->browser.clear();
+        state->mode = decideMode(ic, *state, false);
+        state->autoMode = state->mode;
+        state->manualMode = false;
+    }
 
     if (key.checkKeyList(config_.switchModeKey.value()) && key.sym() != FcitxKey_None) {
         auto clearComposingState = [this, ic, state]() {
-            state->shownText.clear();
-            state->hasRewrittenCurrentWord = false;
-            state->rewriteLock = false;
-            state->waitingBackspaceAck = false;
-            state->expectedBackspaces = 0;
-            state->seenBackspaces = 0;
-            state->pendingKeys.clear();
-            state->rewriteTimer.reset();
-            state->commitTimer.reset();
-            state->pendingConvertedText.clear();
-            state->pendingShownTextAfterCommit.clear();
-            state->hasPendingBoundaryKey = false;
+            state->browser.clear();
+            state->delta.clear();
             state->composing.clear();
             state->macroBuffer.clear();
             state->rollbackWord.clear();
@@ -1836,12 +2953,21 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
             updatePreeditUI(ic, *state);
         };
 
+        const bool hideBrowserModes =
+            shouldHideBrowserModesForProgram(ic, state->program);
         bool returnToAuto = false;
         RuntimeMode nextMode;
         if (!state->manualMode) {
             // First manual override: always offer SurroundingText first.
             nextMode = RuntimeMode::SurroundingText;
         } else if (state->mode == RuntimeMode::SurroundingText) {
+            nextMode = hideBrowserModes
+                           ? RuntimeMode::BackspaceRewriteDelta
+                           : (browserDisabled ? RuntimeMode::BrowserX11
+                                              : RuntimeMode::Browser);
+        } else if (state->mode == RuntimeMode::Browser) {
+            nextMode = RuntimeMode::BackspaceRewriteDelta;
+        } else if (state->mode == RuntimeMode::BrowserX11) {
             nextMode = RuntimeMode::BackspaceRewriteDelta;
         } else if (state->mode == RuntimeMode::BackspaceRewriteDelta) {
             nextMode = RuntimeMode::Preedit;
@@ -1901,6 +3027,10 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                 switch (m) {
                 case RuntimeMode::Auto:
                     return "Auto";
+                case RuntimeMode::Browser:
+                    return "Browser";
+                case RuntimeMode::BrowserX11:
+                    return "Browser X11";
                 case RuntimeMode::SurroundingText:
                     return "Surrounding";
                 case RuntimeMode::Preedit:
@@ -1974,6 +3104,16 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         return;
     case RuntimeMode::DirectCommit:
         return;
+    case RuntimeMode::Browser:
+        if (browserRewriteHandler_) {
+            handled = browserRewriteHandler_->handleKey(ic, event, *state);
+        }
+        return;
+    case RuntimeMode::BrowserX11:
+        if (browserX11RewriteHandler_) {
+            handled = browserX11RewriteHandler_->handleKey(ic, event, *state);
+        }
+        return;
     case RuntimeMode::BackspaceRewriteDelta:
         if (backspaceRewriteHandler_) {
             handled = backspaceRewriteHandler_->handleKey(ic, event, *state);
@@ -2001,9 +3141,7 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                                          RuntimeMode::BackspaceRewriteDelta);
                     persistAppModes();
                 }
-                if (backspaceRewriteHandler_) {
-                    (void)backspaceRewriteHandler_->handleKey(ic, event, *state);
-                }
+                (void)handleBackspaceRewrite(ic, event, *state);
             }
         }
         return;
