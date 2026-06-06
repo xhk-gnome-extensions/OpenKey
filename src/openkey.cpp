@@ -580,11 +580,19 @@ struct RewriteTiming {
     uint64_t commitDelayUsec = 60000;
 };
 
-static constexpr RewriteTiming kDeltaWaylandTiming{1000, 30000};
-static constexpr RewriteTiming kDeltaX11Timing{2000, 60000};
-static constexpr RewriteTiming kDeltaWaylandFcitx4Timing{2000, 60000};
-static constexpr RewriteTiming kDeltaX11Fcitx4Timing{4000, 120000};
-static constexpr RewriteTiming kDeltaX11BrowserTiming{4000, 120000};
+struct DeltaRewriteTiming {
+    uint64_t interKeyUsec = 1000;
+    uint64_t commitExtraUsec = 1000;
+    uint64_t commitCapUsec = 180000;
+};
+
+static constexpr DeltaRewriteTiming kDeltaWaylandTiming{1000, 2000, 180000};
+static constexpr DeltaRewriteTiming kDeltaWaylandBrowserTiming{1000, 4000, 180000};
+static constexpr DeltaRewriteTiming kDeltaWaylandElectronTiming{1000, 4000, 180000};
+static constexpr DeltaRewriteTiming kDeltaX11Timing{1000, 2000, 180000};
+static constexpr DeltaRewriteTiming kDeltaWaylandFcitx4Timing{1000, 2000, 180000};
+static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{1000, 2000, 180000};
+static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{1000, 2000, 180000};
 
 static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 30000};
 static constexpr RewriteTiming kNonPreeditX11Timing{2000, 60000};
@@ -700,8 +708,8 @@ static bool shouldUseDST(fcitx::InputContext *ic, const std::string &program,
     return true;
 }
 
-static RewriteTiming deltaTimingFor(fcitx::InputContext *ic,
-                                    const std::string &program) {
+static DeltaRewriteTiming deltaTimingFor(fcitx::InputContext *ic,
+                                         const std::string &program) {
     const bool x11 = isRunningOnX11(ic);
     const bool fcitx4 = isFcitx4Frontend(ic);
 
@@ -710,6 +718,12 @@ static RewriteTiming deltaTimingFor(fcitx::InputContext *ic,
     }
     if (!x11 && fcitx4) {
         return kDeltaWaylandFcitx4Timing;
+    }
+    if (!x11 && isBrowserLikeProgram(program)) {
+        return kDeltaWaylandBrowserTiming;
+    }
+    if (!x11 && isElectronLikeProgram(program)) {
+        return kDeltaWaylandElectronTiming;
     }
     if (x11 && isBrowserLikeProgram(program)) {
         return kDeltaX11BrowserTiming;
@@ -1069,9 +1083,7 @@ public:
         const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
         const auto adapterShared = deps_.adapter;
         const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-        const RewriteTiming timing = deltaTimingFor(ic, state.program);
-        constexpr uint64_t kDeltaAckTimeoutUsec = 200000;
-        constexpr uint64_t kDeltaLateBackspaceTimeoutUsec = 200000;
+        const DeltaRewriteTiming timing = deltaTimingFor(ic, state.program);
         auto *loop = deps_.instance ? &deps_.instance->eventLoop() : nullptr;
         auto &deltaState = state.delta;
 
@@ -1146,7 +1158,7 @@ public:
 
         auto scheduleLateBudgetTimeoutDrain =
             [icRef, lifetimeWeak, loop, stateFor,
-             scheduleDrainPendingKeys](DeltaRewriteState &deltaState2) {
+             scheduleDrainPendingKeys, timing](DeltaRewriteState &deltaState2) {
                 if (deltaState2.lateBackspaceBudget == 0) {
                     scheduleDrainPendingKeys(deltaState2);
                     return;
@@ -1158,8 +1170,7 @@ public:
                     return;
                 }
                 const uint64_t deadline =
-                    fcitx::now(CLOCK_MONOTONIC) +
-                    kDeltaLateBackspaceTimeoutUsec;
+                    fcitx::now(CLOCK_MONOTONIC) + timing.commitCapUsec;
                 deltaState2.lateBackspaceTimeoutTimer = loop->addTimeEvent(
                     CLOCK_MONOTONIC, deadline, 0,
                     [icRef, lifetimeWeak, stateFor,
@@ -1287,7 +1298,7 @@ public:
                     return;
                 }
                 const uint64_t deadline =
-                    fcitx::now(CLOCK_MONOTONIC) + kDeltaAckTimeoutUsec;
+                    fcitx::now(CLOCK_MONOTONIC) + timing.commitCapUsec;
                 deltaState.ackTimeoutTimer = loop->addTimeEvent(
                     CLOCK_MONOTONIC, deadline, 0,
                     [icRef, lifetimeWeak, stateFor, scheduleCommitAfterBackspace,
@@ -1312,7 +1323,7 @@ public:
                                      << " seen=" << st->delta.seenBackspaces
                                      << " expected="
                                      << st->delta.expectedBackspaces;
-                        scheduleCommitAfterBackspace(timing.commitDelayUsec);
+                        scheduleCommitAfterBackspace(timing.commitExtraUsec);
                         return false;
                     });
                 if (deltaState.ackTimeoutTimer) {
@@ -1358,7 +1369,8 @@ public:
                              << " delete=" << deleteCount
                              << " commit=" << commitText
                              << " inter=" << timing.interKeyUsec
-                             << " delay=" << timing.commitDelayUsec;
+                             << " extra=" << timing.commitExtraUsec
+                             << " cap=" << timing.commitCapUsec;
             }
 
             if (deleteCount == 0) {
@@ -1427,7 +1439,7 @@ public:
 
                 deltaState.ackTimeoutTimer.reset();
                 event.filterAndAccept();
-                scheduleCommitAfterBackspace(timing.commitDelayUsec);
+                scheduleCommitAfterBackspace(timing.commitExtraUsec);
                 return true;
             }
 
