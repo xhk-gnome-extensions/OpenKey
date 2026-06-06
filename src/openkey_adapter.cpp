@@ -310,7 +310,7 @@ OpenKeyProcessResult OpenKeyAdapter::processAsciiKey(const std::string &currentW
         if (len > 0) {
             auto it = fcitx::utf8::nextNChar(currentWord.begin(), len - 1);
             const std::string lastChar(it, currentWord.end());
-            if (lastChar == u8"ư" || lastChar == u8"Ư") {
+            if (lastChar == "ư" || lastChar == "Ư") {
                 result.handled = true;
                 result.newWord = utf8DropLastN(currentWord, 1);
                 result.newWord += asciiChar;

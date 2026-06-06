@@ -19,4 +19,6 @@ target_link_libraries(openkey_adapter_tests PRIVATE
     Fcitx5::Utils
 )
 
+target_compile_features(openkey_adapter_tests PRIVATE cxx_std_17)
+
 add_test(NAME openkey_adapter_tests COMMAND openkey_adapter_tests)

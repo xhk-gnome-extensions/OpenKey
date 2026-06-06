@@ -44,26 +44,26 @@ int main() {
     adapter.setCheckSpelling(true);
 
     expectEq("a", typeSequence(adapter, "a"), "a");
-    expectEq("as", typeSequence(adapter, "as"), u8"á");
-    expectEq("aw", typeSequence(adapter, "aw"), u8"ă");
-    expectEq("aa", typeSequence(adapter, "aa"), u8"â");
-    expectEq("dd", typeSequence(adapter, "dd"), u8"đ");
-    expectEq("uw", typeSequence(adapter, "uw"), u8"ư");
-    expectEq("suw", typeSequence(adapter, "suw"), u8"sư");
+    expectEq("as", typeSequence(adapter, "as"), "á");
+    expectEq("aw", typeSequence(adapter, "aw"), "ă");
+    expectEq("aa", typeSequence(adapter, "aa"), "â");
+    expectEq("dd", typeSequence(adapter, "dd"), "đ");
+    expectEq("uw", typeSequence(adapter, "uw"), "ư");
+    expectEq("suw", typeSequence(adapter, "suw"), "sư");
     expectEq("sww", typeSequence(adapter, "sww"), "sw");
     expectEq("ww", typeSequence(adapter, "ww"), "w");
     // OpenKey core follows standard Telex:
     // - đ = dd
     // - ươ = ow + w (e.g. uow)
-    expectEq("dduowngf", typeSequence(adapter, "dduowngf"), u8"đường");
-    expectEq("tieengs", typeSequence(adapter, "tieengs"), u8"tiếng");
-    expectEq("ddieenj", typeSequence(adapter, "ddieenj"), u8"điện");
-    expectEq("truowngf", typeSequence(adapter, "truowngf"), u8"trường");
-    expectEq("nguoiwf", typeSequence(adapter, "nguoiwf"), u8"người");
+    expectEq("dduowngf", typeSequence(adapter, "dduowngf"), "đường");
+    expectEq("tieengs", typeSequence(adapter, "tieengs"), "tiếng");
+    expectEq("ddieenj", typeSequence(adapter, "ddieenj"), "điện");
+    expectEq("truowngf", typeSequence(adapter, "truowngf"), "trường");
+    expectEq("nguoiwf", typeSequence(adapter, "nguoiwf"), "người");
 
     // Surrounding-text extraction should be char-safe with emoji.
     {
-        const std::string text = std::string(u8"😀") + "abc";
+        const std::string text = std::string("😀") + "abc";
         openkey::WordSegment seg;
         const unsigned int cursorChar = fcitx::utf8::length(text);
         const bool ok = openkey::extractWordBeforeCursor(text, cursorChar, seg);
