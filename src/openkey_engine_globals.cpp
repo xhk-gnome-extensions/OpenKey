@@ -14,7 +14,6 @@ int vCheckSpelling = 1;
 int vUseModernOrthography = 1;
 int vQuickTelex = 0;
 int vRestoreIfWrongSpelling = 0;
-int vFixRecommendBrowser = 0;
 int vUseMacro = 0;
 int vUseMacroInEnglishMode = 0;
 int vAutoCapsMacro = 0;
@@ -27,4 +26,3 @@ int vQuickEndConsonant = 0;
 int vRememberCode = 0;
 int vOtherLanguage = 0;
 int vTempOffOpenKey = 0;
-

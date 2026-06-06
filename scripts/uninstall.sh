@@ -65,6 +65,7 @@ else
 
   echo "[openkey] No install manifest found; removing known paths (best-effort)"
   sudo rm -f -- "$LIBDIR/fcitx5/openkey.so" || true
+  sudo rm -f -- "$PREFIX/libexec/openkey-nonpreedit-server" || true
   sudo rm -f -- "$PREFIX/share/fcitx5/addon/openkey.conf" || true
   sudo rm -f -- "$PREFIX/share/fcitx5/inputmethod/openkey.conf" || true
 
