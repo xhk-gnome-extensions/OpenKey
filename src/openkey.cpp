@@ -575,31 +575,6 @@ static bool runtimeModeFromString(const std::string &mode, RuntimeMode &out) {
     return false;
 }
 
-static bool shouldUseDST(fcitx::InputContext *ic, const std::string &program,
-                         int count) {
-    if (!ic) return false;
-
-    if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
-        return false;
-    }
-
-    // If we can't identify the program, prefer uinput/server backspace.
-    if (program.empty()) return false;
-
-    const auto &st = ic->surroundingText();
-
-    // Rule 4: surrounding text phải hợp lệ
-    if (!st.isValid()) return false;
-
-    // Rule 5: không xử lý khi đang select text
-    if (st.cursor() != st.anchor()) return false;
-
-    // Rule 6: đủ ký tự để xóa
-    if (static_cast<unsigned int>(count) > st.cursor()) return false;
-
-    return true;
-}
-
 struct RewriteTiming {
     uint64_t interKeyUsec = 2000;
     uint64_t commitDelayUsec = 60000;
@@ -660,6 +635,69 @@ static bool isBrowserLikeProgram(const std::string &program) {
         }
     }
     return false;
+}
+
+static bool isElectronLikeProgram(const std::string &program) {
+    if (program.empty()) {
+        return false;
+    }
+
+    const std::string base = normalizedProgramName(program);
+    static const std::vector<std::string> kElectronPatterns = {
+        "electron", "code",     "vscode",   "codium",  "cursor",
+        "windsurf", "discord",  "slack",    "teams",   "obsidian",
+        "notion",   "signal",   "element",  "postman", "insomnia",
+        "figma",    "caprine",  "mattermost",
+    };
+
+    for (const auto &pattern : kElectronPatterns) {
+        if (base.find(pattern) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool shouldSkipDSTOnWayland(fcitx::InputContext *ic,
+                                   const std::string &program) {
+    return !isRunningOnX11(ic) &&
+           (isBrowserLikeProgram(program) || isElectronLikeProgram(program));
+}
+
+static bool shouldUseDST(fcitx::InputContext *ic, const std::string &program,
+                         int count) {
+    if (!ic) {
+        return false;
+    }
+
+    if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+        return false;
+    }
+
+    // If we can't identify the program, prefer uinput/server backspace.
+    if (program.empty()) {
+        return false;
+    }
+
+    if (shouldSkipDSTOnWayland(ic, program)) {
+        return false;
+    }
+
+    const auto &st = ic->surroundingText();
+
+    if (!st.isValid()) {
+        return false;
+    }
+
+    if (st.cursor() != st.anchor()) {
+        return false;
+    }
+
+    if (static_cast<unsigned int>(count) > st.cursor()) {
+        return false;
+    }
+
+    return true;
 }
 
 static RewriteTiming deltaTimingFor(fcitx::InputContext *ic,
@@ -2322,6 +2360,14 @@ bool OpenKeyEngine::handleSurroundingText(fcitx::InputContext *ic,
                      << " sym=" << key.sym()
                      << " rollbackDisplay=" << state.rollbackDisplay
                      << " rollbackWord=" << state.rollbackWord;
+    }
+
+    if (shouldSkipDSTOnWayland(ic, state.program)) {
+        state.macroBuffer.clear();
+        state.rollbackWord.clear();
+        state.rollbackDisplay.clear();
+        state.noSeedNextWord = false;
+        return false;
     }
 
     if (key.check(FcitxKey_Delete) ||
