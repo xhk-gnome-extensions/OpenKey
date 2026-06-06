@@ -28,7 +28,6 @@ public:
     void setUseModernOrthography(bool enabled);
     void setQuickTelex(bool enabled);
     void setRestoreIfWrongSpelling(bool enabled);
-    void setFixRecommendBrowser(bool enabled);
     void setUpperCaseFirstChar(bool enabled);
     void setAllowConsonantZFWJ(bool enabled);
     void setQuickStartConsonant(bool enabled);

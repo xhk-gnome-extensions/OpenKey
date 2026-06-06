@@ -18,6 +18,7 @@ install_deps_debian() {
     pkg-config
     extra-cmake-modules
     gettext
+    golang-go
     fcitx5
     fcitx5-config-qt
     fcitx5-frontend-gtk3

@@ -65,9 +65,6 @@ void OpenKeyAdapter::setQuickTelex(bool enabled) { vQuickTelex = enabled ? 1 : 0
 void OpenKeyAdapter::setRestoreIfWrongSpelling(bool enabled) {
     vRestoreIfWrongSpelling = enabled ? 1 : 0;
 }
-void OpenKeyAdapter::setFixRecommendBrowser(bool enabled) {
-    vFixRecommendBrowser = enabled ? 1 : 0;
-}
 void OpenKeyAdapter::setUpperCaseFirstChar(bool enabled) {
     vUpperCaseFirstChar = enabled ? 1 : 0;
 }

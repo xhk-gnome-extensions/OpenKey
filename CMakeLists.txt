@@ -11,6 +11,8 @@ find_package(Fcitx5Utils REQUIRED)
 include("${FCITX_INSTALL_CMAKECONFIG_DIR}/Fcitx5Utils/Fcitx5CompilerSettings.cmake")
 include(CTest)
 
+find_program(GO_EXECUTABLE go)
+
 add_library(openkey SHARED)
 set_target_properties(openkey PROPERTIES
     PREFIX ""
@@ -20,6 +22,7 @@ set_target_properties(openkey PROPERTIES
 target_compile_features(openkey PRIVATE cxx_std_17)
 target_compile_definitions(openkey PRIVATE
     LINUX=1
+    OPENKEY_NONPREEDIT_SERVER_PATH="${CMAKE_INSTALL_FULL_LIBEXECDIR}/openkey-nonpreedit-server"
 )
 
 target_include_directories(openkey PRIVATE
@@ -96,6 +99,27 @@ install(
     FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/symbolic/apps/openkey-symbolic.svg"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/symbolic/apps"
 )
+
+if(GO_EXECUTABLE)
+    set(OPENKEY_NONPREEDIT_SERVER_BINARY
+        "${CMAKE_CURRENT_BINARY_DIR}/openkey-nonpreedit-server")
+    add_custom_command(
+        OUTPUT "${OPENKEY_NONPREEDIT_SERVER_BINARY}"
+        COMMAND "${GO_EXECUTABLE}" build -o "${OPENKEY_NONPREEDIT_SERVER_BINARY}" .
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tools/openkey-nonpreedit-server"
+        DEPENDS
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/openkey-nonpreedit-server/go.mod"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/openkey-nonpreedit-server/main.go"
+        VERBATIM
+    )
+    add_custom_target(openkey-nonpreedit-server-bin ALL
+        DEPENDS "${OPENKEY_NONPREEDIT_SERVER_BINARY}")
+    install(
+        PROGRAMS "${OPENKEY_NONPREEDIT_SERVER_BINARY}"
+        DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}"
+    )
+endif()
+
 install(
     FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/symbolic/apps/fcitx-openkey-symbolic.svg"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/symbolic/apps"

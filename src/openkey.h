@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -25,6 +26,7 @@ namespace openkey {
 struct OpenKeyState;
 class OpenKeyAdapter;
 class FocusedAppBridge;
+class RemoteNonPreeditCoordinator;
 
 class InputModeHandler {
 public:
@@ -64,30 +66,6 @@ FCITX_CONFIGURATION(OpenKeyConfig,
                                   "CodeTable",
                                   N_("Output Code Table"),
                                   CodeTable::Unicode};
-                    fcitx::HiddenOption<int>
-                        bsRewriteCommitExtraUsec{
-                            this,
-                            "BackspaceRewriteCommitExtraUsec",
-                            N_("Backspace-rewrite: extra commit delay (usec)"),
-                            1000};
-                    fcitx::HiddenOption<int>
-                        bsRewriteCommitCapUsec{
-                            this,
-                            "BackspaceRewriteCommitCapUsec",
-                            N_("Backspace-rewrite: max commit delay (usec)"),
-                            180000};
-                    fcitx::HiddenOption<int>
-                        bsRewriteUinputInterKeyUsec{
-                            this,
-                            "BackspaceRewriteUinputInterKeyUsec",
-                            N_("Backspace-rewrite: uinput inter-backspace delay (usec)"),
-                            1000};
-                    fcitx::HiddenOption<int>
-                        browserRewriteCommitDelayUsec{
-                            this,
-                            "BrowserRewriteCommitDelayUsec",
-                            N_("Browser mode: delay after uinput backspace before commit (usec)"),
-                            150000};
                     fcitx::Option<bool> freeMark{this,
                                                  "FreeMark",
                                                  N_("Free Mark"),
@@ -112,11 +90,6 @@ FCITX_CONFIGURATION(OpenKeyConfig,
                                                "RestoreIfWrongSpelling",
                                                N_("Restore key on wrong spelling"),
                                                false};
-                    fcitx::Option<bool>
-                        fixRecommendBrowser{this,
-                                            "FixRecommendBrowser",
-                                            N_("Fix browser/Excel quirks"),
-                                            true};
                     fcitx::Option<bool>
                         upperCaseFirstChar{this,
                                            "UpperCaseFirstChar",
@@ -175,40 +148,11 @@ FCITX_CONFIGURATION(OpenKeyConfig,
 
 enum class RuntimeMode {
     Auto,
-    Browser,
-    BrowserX11,
     BackspaceRewriteDelta,
+    NonPreeditBackspaceRewrite,
     SurroundingText,
     Preedit,
     DirectCommit,
-};
-
-struct BrowserRewriteState {
-    std::string shownText;
-    bool hasRewrittenCurrentWord = false;
-    bool rewriteLock = false;
-    int expectedBackspaces = 0;
-    int lateBackspaceBudget = 0;
-    std::vector<fcitx::Key> pendingKeys;
-    std::unique_ptr<fcitx::EventSourceTime> drainPendingTimer;
-    std::unique_ptr<fcitx::EventSourceTime> commitTimer;
-    std::unique_ptr<fcitx::EventSourceTime> lateBackspaceTimeoutTimer;
-    std::string pendingConvertedText;
-    std::string pendingShownTextAfterCommit;
-
-    void clear() {
-        shownText.clear();
-        hasRewrittenCurrentWord = false;
-        rewriteLock = false;
-        expectedBackspaces = 0;
-        lateBackspaceBudget = 0;
-        pendingKeys.clear();
-        drainPendingTimer.reset();
-        commitTimer.reset();
-        lateBackspaceTimeoutTimer.reset();
-        pendingConvertedText.clear();
-        pendingShownTextAfterCommit.clear();
-    }
 };
 
 struct DeltaRewriteState {
@@ -245,9 +189,49 @@ struct DeltaRewriteState {
     }
 };
 
+struct NonPreeditDeltaRewriteState {
+    std::string shownText;
+    bool hasRewrittenCurrentWord = false;
+    bool rewriteLock = false;
+    bool waitingBackspaceAck = false;
+    bool processingNonPreedit = false;
+    int expectedBackspaces = 0;
+    int seenBackspaces = 0;
+    int lateBackspaceBudget = 0;
+    std::deque<fcitx::Key> nonPreeditKeys;
+    std::unique_ptr<fcitx::EventSourceTime> commitTimer;
+    std::unique_ptr<fcitx::EventSourceTime> lateBackspaceTimeoutTimer;
+    std::unique_ptr<fcitx::EventSourceTime> ackTimeoutTimer;
+    std::string pendingConvertedText;
+    std::string pendingShownTextAfterCommit;
+    uint64_t remoteSessionId = 0;
+    uint64_t remoteNextTxId = 1;
+    uint64_t remotePendingTxId = 0;
+    bool remoteRewritePending = false;
+
+    void clear() {
+        shownText.clear();
+        hasRewrittenCurrentWord = false;
+        rewriteLock = false;
+        waitingBackspaceAck = false;
+        processingNonPreedit = false;
+        expectedBackspaces = 0;
+        seenBackspaces = 0;
+        lateBackspaceBudget = 0;
+        nonPreeditKeys.clear();
+        commitTimer.reset();
+        lateBackspaceTimeoutTimer.reset();
+        ackTimeoutTimer.reset();
+        pendingConvertedText.clear();
+        pendingShownTextAfterCommit.clear();
+        remotePendingTxId = 0;
+        remoteRewritePending = false;
+    }
+};
+
 struct OpenKeyState : public fcitx::InputContextProperty {
-    BrowserRewriteState browser;
     DeltaRewriteState delta;
+    NonPreeditDeltaRewriteState nonPreeditDelta;
     std::unique_ptr<fcitx::EventSourceTime> modeInfoTimer;
 
     std::string composing;
@@ -303,14 +287,14 @@ private:
 
     // Core adapter.
     std::shared_ptr<OpenKeyAdapter> adapter_;
+    std::unique_ptr<RemoteNonPreeditCoordinator> remoteNonPreeditCoordinator_;
 
     // Optional bridge to GNOME Shell extension to resolve app id/name when
     // InputContext::program() is empty (common on Wayland for some clients).
     std::unique_ptr<FocusedAppBridge> focusedAppBridge_;
 
-    std::unique_ptr<InputModeHandler> browserRewriteHandler_;
-    std::unique_ptr<InputModeHandler> browserX11RewriteHandler_;
     std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
+    std::unique_ptr<InputModeHandler> nonPreeditBackspaceRewriteHandler_;
 
     bool debugEnabled() const;
     void loadAppModes();
@@ -318,6 +302,7 @@ private:
     void setAppModeForProgram(const std::string &program, RuntimeMode mode);
     void applyConfig();
     void persistConfig();
+    bool nonPreeditServerAvailable();
 
     OpenKeyState *stateFor(fcitx::InputContext *ic);
 
@@ -329,6 +314,12 @@ private:
                                OpenKeyState &state);
     bool handleBackspaceRewrite(fcitx::InputContext *ic,
                                 fcitx::KeyEvent &event, OpenKeyState &state);
+    bool scheduleRemoteNonPreeditRewrite(fcitx::InputContext *ic, OpenKeyState &state,
+                                    unsigned int deleteCount,
+                                    uint64_t interBackspaceUsec,
+                                    uint64_t commitDelayUsec);
+    void handleRemoteNonPreeditDone(fcitx::InputContext *ic, uint64_t sessionId,
+                               uint64_t txId);
 
     void updatePreeditUI(fcitx::InputContext *ic, const OpenKeyState &state);
     void commitAndClearPreedit(fcitx::InputContext *ic, OpenKeyState &state);
