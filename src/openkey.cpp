@@ -15,6 +15,10 @@
 #include <sys/time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <signal.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <unistd.h>
 #include <utility>
 #include <unordered_set>
@@ -232,21 +236,19 @@ private:
                          << " socket=" << socketPath_;
         }
 
-        const pid_t firstChild = fork();
-        if (firstChild < 0) {
+        const pid_t child = fork();
+        if (child < 0) {
             maybeLog("fork failed");
             return false;
         }
 
-        if (firstChild == 0) {
-            const pid_t daemonChild = fork();
-            if (daemonChild < 0) {
-                _exit(127);
-            }
-            if (daemonChild > 0) {
+        if (child == 0) {
+#ifdef __linux__
+            (void)prctl(PR_SET_PDEATHSIG, SIGTERM);
+            if (getppid() == 1) {
                 _exit(0);
             }
-
+#endif
             setsid();
             const int nullFd = ::open("/dev/null", O_RDWR);
             if (nullFd >= 0) {
@@ -263,19 +265,7 @@ private:
             _exit(127);
         }
 
-        int status = 0;
-        while (waitpid(firstChild, &status, 0) < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            maybeLog("waitpid failed");
-            return false;
-        }
-
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            maybeLog("server launcher failed");
-            return false;
-        }
+        serverPid_ = child;
         return true;
     }
 
@@ -307,6 +297,7 @@ private:
     }
 
     void stop() {
+        pid_t serverPid = -1;
         {
             std::lock_guard<std::mutex> lock(ioMutex_);
             stop_ = true;
@@ -315,9 +306,20 @@ private:
                 ::close(fd_);
                 fd_ = -1;
             }
+            serverPid = serverPid_;
+            serverPid_ = -1;
         }
         if (readerThread_.joinable()) {
             readerThread_.join();
+        }
+        if (serverPid > 0) {
+            ::kill(serverPid, SIGTERM);
+            int status = 0;
+            while (waitpid(serverPid, &status, 0) < 0) {
+                if (errno != EINTR) {
+                    break;
+                }
+            }
         }
     }
 
@@ -403,6 +405,7 @@ private:
     int fd_ = -1;
     bool stop_ = false;
     bool startAttempted_ = false;
+    pid_t serverPid_ = -1;
     std::thread readerThread_;
     std::unordered_map<uint64_t,
                        fcitx::TrackableObjectReference<fcitx::InputContext>>
