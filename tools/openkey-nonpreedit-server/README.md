@@ -1,14 +1,14 @@
 # OpenKey NonPreedit Server
 
-Server Go thử nghiệm để nhận transaction `PLAN` từ addon `nonPreedit` mode, tự bơm
+Server Go để nhận transaction `PLAN` từ addon `NonPreedit` mode, tự bơm
 `BackSpace` thật qua `/dev/uinput`, rồi phát lại `DONE` cho addon.
 
 Addon hiện sẽ:
 
 - tự tính `newWord` như cũ trong C++
-- nếu có server ở socket `/tmp/openkey-nonpreedit.sock` thì giao phần
-  `BACKSPACE + timer` sang server
-- nếu không kết nối được server thì addon bỏ qua `nonPreedit` mode
+- tự spawn server nếu socket `/tmp/openkey-nonpreedit.sock` chưa sẵn sàng
+- giao phần `BACKSPACE + timer` sang server khi helper kết nối được
+- fallback sang mode rewrite cũ nếu helper không sẵn sàng
 
 ## Chạy thử
 
@@ -31,13 +31,16 @@ OPENKEY_NONPREEDIT_SERVER_LOG=1
 OPENKEY_NONPREEDIT_SERVER_DEBUG=1
 ```
 
+Server tạo virtual keyboard qua `/dev/uinput` và đăng ký keycode chuẩn `1..255`
+để tránh GNOME/Mutter thu hẹp global keymap khi thiết bị ảo được thêm vào.
+Khi addon spawn server, server sẽ nhận `SIGTERM` lúc `fcitx5` tắt.
+
 ## Protocol
 
 Client -> server:
 
 ```text
 PLAN <session> <tx> <backspaces> <inter_usec> <commit_delay_usec>
-CANCEL <session>
 ```
 
 Server -> client:
