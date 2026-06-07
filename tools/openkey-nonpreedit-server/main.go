@@ -105,9 +105,10 @@ func (d *uinputDevice) ensureOpen() error {
 		_ = syscall.Close(fd)
 		return err
 	}
-	if err := ioctlUintptr(fd, uiSetKeybit, uintptr(keyBackspace)); err != nil {
-		_ = syscall.Close(fd)
-		return err
+	// Register all standard keys (1 to 255) to prevent DEs (like GNOME/Mutter)
+	// from restricting the global keymap when this virtual keyboard is added.
+	for i := 1; i <= 255; i++ {
+		_ = ioctlUintptr(fd, uiSetKeybit, uintptr(i))
 	}
 
 	var setup uinputSetup

@@ -666,8 +666,10 @@ static bool isElectronLikeProgram(const std::string &program) {
 
 static bool shouldSkipDSTOnWayland(fcitx::InputContext *ic,
                                    const std::string &program) {
-    return !isRunningOnX11(ic) &&
-           (isBrowserLikeProgram(program) || isElectronLikeProgram(program));
+    // Returning false allows deleteSurroundingText to be used in Wayland browsers,
+    // which prevents the "URL bar auto-suggestion selection" bug where a physical
+    // backspace deletes the suggestion instead of the typed character.
+    return false;
 }
 
 static bool shouldUseDST(fcitx::InputContext *ic, const std::string &program,
@@ -1383,9 +1385,17 @@ public:
                 return true;
             }
 
+            unsigned int actualDeleteCount = deleteCount;
+            if (ic) {
+                const auto &st = ic->surroundingText();
+                if (st.isValid() && st.cursor() != st.anchor()) {
+                    actualDeleteCount += 1;
+                }
+            }
+
             const std::string programForInjector = state.program;
             const auto method = deps_.backspaceInjector->sendBackspaces(
-                ic, programForInjector, static_cast<int>(deleteCount), debug,
+                ic, programForInjector, static_cast<int>(actualDeleteCount), debug,
                 timing.interKeyUsec);
 
             if (method == BackspaceInjector::Method::DeleteSurroundingText) {
@@ -1407,7 +1417,7 @@ public:
                 deltaState.rewriteLock = true;
                 deltaState.waitingBackspaceAck = true;
                 deltaState.expectedBackspaces =
-                    static_cast<int>(deleteCount) + 1;
+                    static_cast<int>(actualDeleteCount) + 1;
                 deltaState.seenBackspaces = 0;
                 deltaState.pendingConvertedText = std::move(commitText);
                 deltaState.pendingShownTextAfterCommit = newWord;
@@ -1566,10 +1576,12 @@ public:
             return true;
         }
 
-        nonPreeditState.nonPreeditKeys.push_back(key);
-        event.filterAndAccept();
-        pumpNonPreedit(ic, state, adapterShared, debug);
-        return true;
+        const bool handled = processNonPreeditKey(ic, state, key, adapterShared, debug);
+        if (handled) {
+            event.filterAndAccept();
+            return true;
+        }
+        return false;
     }
 
     void handleRemoteBackspaceAction(fcitx::InputContext *ic,
@@ -1709,16 +1721,24 @@ private:
 
         if (deps_.nonPreeditRemoteEnabled && deps_.nonPreeditRemoteEnabled() &&
             deps_.nonPreeditRemoteSchedule) {
+            unsigned int uinputDeleteCount = deleteCount;
+            if (ic) {
+                const auto &st = ic->surroundingText();
+                if (st.isValid() && st.cursor() != st.anchor()) {
+                    uinputDeleteCount += 1;
+                }
+            }
+
             nonPreeditState.rewriteLock = true;
             nonPreeditState.waitingBackspaceAck = false;
-            nonPreeditState.expectedBackspaces = static_cast<int>(deleteCount);
+            nonPreeditState.expectedBackspaces = static_cast<int>(uinputDeleteCount);
             nonPreeditState.seenBackspaces = 0;
             nonPreeditState.pendingConvertedText = commitText;
             nonPreeditState.pendingShownTextAfterCommit = newWord;
             nonPreeditState.hasRewrittenCurrentWord =
                 nonPreeditState.hasRewrittenCurrentWord || (newWord != rawAppend);
             if (deps_.nonPreeditRemoteSchedule(
-                    ic, state, deleteCount, timing.interKeyUsec,
+                    ic, state, uinputDeleteCount, timing.interKeyUsec,
                     timing.commitDelayUsec)) {
                 nonPreeditState.remoteRewritePending = true;
                 return true;
