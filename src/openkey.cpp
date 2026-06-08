@@ -601,7 +601,7 @@ static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{1000, 100000};
 static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 50000};
 static constexpr RewriteTiming kNonPreeditX11Timing{1000, 50000};
 static constexpr RewriteTiming kNonPreeditFcitx4Timing{1000, 100000};
-static constexpr RewriteTiming kNonPreeditX11BrowserTiming{1000, 50000};
+static constexpr RewriteTiming kNonPreeditX11BrowserTiming{1000, 100000};
 
 static bool isRunningOnX11(fcitx::InputContext *ic) {
     (void)ic;
