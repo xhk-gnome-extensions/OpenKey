@@ -657,6 +657,85 @@ static bool isBrowserLikeProgram(const std::string &program) {
     return false;
 }
 
+static bool looksLikeBrowserAutocomplete(fcitx::InputContext *ic,
+                                         const std::string &shownText) {
+    if (!ic || shownText.empty()) {
+        return false;
+    }
+
+    if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+        return false;
+    }
+
+    const auto &st = ic->surroundingText();
+    if (!st.isValid()) {
+        return false;
+    }
+
+    const auto &text = st.text();
+    const unsigned int cursor = st.cursor();
+    const unsigned int anchor = st.anchor();
+
+    const size_t textLen = fcitx::utf8::length(text);
+    const size_t shownLen = fcitx::utf8::length(shownText);
+
+    if (cursor > textLen || anchor > textLen || shownLen == 0 || shownLen > textLen) {
+        return false;
+    }
+
+    size_t rangeStart = cursor >= shownLen ? cursor - shownLen : 0;
+    size_t pb = text.find(shownText);
+
+    bool samePrefix =
+        pb != std::string::npos &&
+        pb >= rangeStart &&
+        pb <= cursor;
+
+    if (!samePrefix) {
+        return false;
+    }
+
+    auto hasNewlineBetween = [&](size_t from, size_t to) {
+        if (from > to) {
+            std::swap(from, to);
+        }
+        size_t p = text.find('\n', from);
+        return p != std::string::npos && p < to;
+    };
+
+    // Case 1: omnibox/autocomplete thường select phần phía sau cursor tới cuối dòng.
+    if (cursor != anchor) {
+        unsigned int selectionStart = std::min(cursor, anchor);
+        unsigned int selectionEnd = std::max(cursor, anchor);
+
+        bool selectionTouchesCursor =
+            selectionStart == cursor ||
+            (selectionStart < cursor && selectionEnd > cursor);
+
+        bool selectionGoesToLineEnd =
+            selectionEnd == textLen ||
+            text.find('\n', selectionEnd) == std::string::npos;
+
+        return selectionTouchesCursor &&
+               selectionGoesToLineEnd &&
+               !hasNewlineBetween(selectionStart, selectionEnd);
+    }
+
+    // Case 2: không selection nhưng sau cursor có text tự mọc thêm.
+    // Giống browser search/address autocomplete.
+    if (cursor < textLen) {
+        if (text.find('\n', cursor) != std::string::npos) {
+            return false;
+        }
+
+        // Sau cursor còn ít nhất 2 ký tự thì mới coi là autocomplete,
+        // tránh nhầm khi user sửa giữa từ thường.
+        return textLen >= static_cast<size_t>(cursor) + 2;
+    }
+
+    return false;
+}
+
 static bool isElectronLikeProgram(const std::string &program) {
     if (program.empty()) {
         return false;
@@ -1338,6 +1417,12 @@ private:
         unsigned int deleteCount =
             utf8CharCount(deltaState.shownText.substr(prefixLen));
         std::string commitText = newWord.substr(prefixLen);
+        if (deleteCount > 0 &&
+            isBrowserLikeProgram(state.program) &&
+            !deltaState.hasRewrittenCurrentWord &&
+            looksLikeBrowserAutocomplete(ic, deltaState.shownText)) {
+            deleteCount += 1;
+        }
         if (deleteCount > 128) {
             deleteCount = utf8CharCount(deltaState.shownText);
             commitText = newWord;
@@ -1642,6 +1727,12 @@ private:
         unsigned int deleteCount =
             utf8CharCount(nonPreeditState.shownText.substr(prefixLen));
         std::string commitText = newWord.substr(prefixLen);
+        if (deleteCount > 0 &&
+            isBrowserLikeProgram(state.program) &&
+            !nonPreeditState.hasRewrittenCurrentWord &&
+            looksLikeBrowserAutocomplete(ic, nonPreeditState.shownText)) {
+            deleteCount += 1;
+        }
         if (deleteCount > 128) {
             deleteCount = utf8CharCount(nonPreeditState.shownText);
             commitText = newWord;
