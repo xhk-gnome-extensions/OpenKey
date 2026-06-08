@@ -768,6 +768,11 @@ static bool shouldUseDST(fcitx::InputContext *ic, const std::string &program,
         return false;
     }
 
+    //TODO: check again
+    if(!isRunningOnX11(ic)){
+        return false;
+    }
+
     if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
         return false;
     }
