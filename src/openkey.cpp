@@ -590,19 +590,18 @@ struct DeltaRewriteTiming {
 
 // Delta timing tuned based on NonPreedit values
 // Format: {interKeyUsec, commitDelayUsec}
-static constexpr DeltaRewriteTiming kDeltaWaylandTiming{1000, 30000};
-static constexpr DeltaRewriteTiming kDeltaWaylandBrowserTiming{1000, 30000};
-static constexpr DeltaRewriteTiming kDeltaWaylandElectronTiming{1000, 30000};
-static constexpr DeltaRewriteTiming kDeltaX11Timing{1000, 30000};
-static constexpr DeltaRewriteTiming kDeltaWaylandFcitx4Timing{2000, 60000};
-static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{2000, 60000};
-static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{2000, 60000};
+static constexpr DeltaRewriteTiming kDeltaWaylandTiming{1000, 50000};
+static constexpr DeltaRewriteTiming kDeltaWaylandBrowserTiming{1000, 50000};
+static constexpr DeltaRewriteTiming kDeltaWaylandElectronTiming{1000, 50000};
+static constexpr DeltaRewriteTiming kDeltaX11Timing{1000, 50000};
+static constexpr DeltaRewriteTiming kDeltaWaylandFcitx4Timing{1000, 100000};
+static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{1000, 100000};
+static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{1000, 100000};
 
-static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 30000};
-static constexpr RewriteTiming kNonPreeditX11Timing{2000, 60000};
-static constexpr RewriteTiming kNonPreeditWaylandFcitx4Timing{2000, 60000};
-static constexpr RewriteTiming kNonPreeditX11Fcitx4Timing{2000, 60000};
-static constexpr RewriteTiming kNonPreeditX11BrowserTiming{2000, 60000};
+static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 50000};
+static constexpr RewriteTiming kNonPreeditX11Timing{1000, 50000};
+static constexpr RewriteTiming kNonPreeditFcitx4Timing{1000, 100000};
+static constexpr RewriteTiming kNonPreeditX11BrowserTiming{1000, 50000};
 
 static bool isRunningOnX11(fcitx::InputContext *ic) {
     (void)ic;
@@ -654,6 +653,85 @@ static bool isBrowserLikeProgram(const std::string &program) {
             return true;
         }
     }
+    return false;
+}
+
+static bool looksLikeBrowserAutocomplete(fcitx::InputContext *ic,
+                                         const std::string &shownText) {
+    if (!ic || shownText.empty()) {
+        return false;
+    }
+
+    if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+        return false;
+    }
+
+    const auto &st = ic->surroundingText();
+    if (!st.isValid()) {
+        return false;
+    }
+
+    const auto &text = st.text();
+    const unsigned int cursor = st.cursor();
+    const unsigned int anchor = st.anchor();
+
+    const size_t textLen = fcitx::utf8::length(text);
+    const size_t shownLen = fcitx::utf8::length(shownText);
+
+    if (cursor > textLen || anchor > textLen || shownLen == 0 || shownLen > textLen) {
+        return false;
+    }
+
+    size_t rangeStart = cursor >= shownLen ? cursor - shownLen : 0;
+    size_t pb = text.find(shownText);
+
+    bool samePrefix =
+        pb != std::string::npos &&
+        pb >= rangeStart &&
+        pb <= cursor;
+
+    if (!samePrefix) {
+        return false;
+    }
+
+    auto hasNewlineBetween = [&](size_t from, size_t to) {
+        if (from > to) {
+            std::swap(from, to);
+        }
+        size_t p = text.find('\n', from);
+        return p != std::string::npos && p < to;
+    };
+
+    // Case 1: omnibox/autocomplete thường select phần phía sau cursor tới cuối dòng.
+    if (cursor != anchor) {
+        unsigned int selectionStart = std::min(cursor, anchor);
+        unsigned int selectionEnd = std::max(cursor, anchor);
+
+        bool selectionTouchesCursor =
+            selectionStart == cursor ||
+            (selectionStart < cursor && selectionEnd > cursor);
+
+        bool selectionGoesToLineEnd =
+            selectionEnd == textLen ||
+            text.find('\n', selectionEnd) == std::string::npos;
+
+        return selectionTouchesCursor &&
+               selectionGoesToLineEnd &&
+               !hasNewlineBetween(selectionStart, selectionEnd);
+    }
+
+    // Case 2: không selection nhưng sau cursor có text tự mọc thêm.
+    // Giống browser search/address autocomplete.
+    if (cursor < textLen) {
+        if (text.find('\n', cursor) != std::string::npos) {
+            return false;
+        }
+
+        // Sau cursor còn ít nhất 2 ký tự thì mới coi là autocomplete,
+        // tránh nhầm khi user sửa giữa từ thường.
+        return textLen >= static_cast<size_t>(cursor) + 2;
+    }
+
     return false;
 }
 
@@ -751,15 +829,14 @@ static RewriteTiming nonPreeditTimingFor(fcitx::InputContext *ic,
     const bool x11 = isRunningOnX11(ic);
     const bool fcitx4 = isFcitx4Frontend(ic);
 
-    if (x11 && fcitx4) {
-        return kNonPreeditX11Fcitx4Timing;
+    if (fcitx4) {
+        return kNonPreeditFcitx4Timing;
     }
-    if (!x11 && fcitx4) {
-        return kNonPreeditWaylandFcitx4Timing;
-    }
+
     if (x11 && isBrowserLikeProgram(program)) {
         return kNonPreeditX11BrowserTiming;
     }
+
     if (x11) {
         return kNonPreeditX11Timing;
     }
@@ -1338,6 +1415,12 @@ private:
         unsigned int deleteCount =
             utf8CharCount(deltaState.shownText.substr(prefixLen));
         std::string commitText = newWord.substr(prefixLen);
+        if (deleteCount > 0 &&
+            isBrowserLikeProgram(state.program) &&
+            !deltaState.hasRewrittenCurrentWord &&
+            looksLikeBrowserAutocomplete(ic, deltaState.shownText)) {
+            deleteCount += 1;
+        }
         if (deleteCount > 128) {
             deleteCount = utf8CharCount(deltaState.shownText);
             commitText = newWord;
@@ -1520,7 +1603,7 @@ public:
     }
 
     if (isBackspace()) {
-        clearComposeState(nonPreeditState);
+        clearComposeState(nonPreeditState, "backspace");
         return false;
     }
 
@@ -1540,7 +1623,7 @@ public:
     if (key.isCursorMove() || normKey.isCursorMove() ||
         key.check(FcitxKey_Delete) || normKey.check(FcitxKey_Delete) ||
         key.check(FcitxKey_Escape) || normKey.check(FcitxKey_Escape)) {
-        clearComposeState(nonPreeditState);
+        clearComposeState(nonPreeditState, "cursor-delete");
     }
 
     return false;
@@ -1573,7 +1656,18 @@ private:
         return ic->propertyFor(deps_.factory);
     }
 
-    void clearComposeState(NonPreeditDeltaRewriteState &nonPreeditState) const {
+   void clearComposeState(NonPreeditDeltaRewriteState &nonPreeditState,
+                       const char *reason = "unknown") const {
+        
+        if (deps_.debugEnabled && deps_.debugEnabled()) {
+            FCITX_INFO() << "openkey: nonPreedit clear"
+                        << " reason=" << reason
+                        << " shown=" << nonPreeditState.shownText
+                        << " pending=" << nonPreeditState.nonPreeditKeys.size()
+                        << " rewriteLock=" << nonPreeditState.rewriteLock
+                        << " waitingAck=" << nonPreeditState.waitingBackspaceAck
+                        << " remotePending=" << nonPreeditState.remoteRewritePending;
+        }
         nonPreeditState.shownText.clear();
         nonPreeditState.hasRewrittenCurrentWord = false;
         nonPreeditState.rewriteLock = false;
@@ -1630,7 +1724,7 @@ private:
         }
         if (!fcitx::utf8::validate(nonPreeditState.shownText) ||
             !fcitx::utf8::validate(newWord)) {
-            clearComposeState(nonPreeditState);
+            clearComposeState(nonPreeditState, "invalid-utf8");
             return false;
         }
 
@@ -1642,6 +1736,12 @@ private:
         unsigned int deleteCount =
             utf8CharCount(nonPreeditState.shownText.substr(prefixLen));
         std::string commitText = newWord.substr(prefixLen);
+        if (deleteCount > 0 &&
+            isBrowserLikeProgram(state.program) &&
+            !nonPreeditState.hasRewrittenCurrentWord &&
+            looksLikeBrowserAutocomplete(ic, nonPreeditState.shownText)) {
+            deleteCount += 1;
+        }
         if (deleteCount > 128) {
             deleteCount = utf8CharCount(nonPreeditState.shownText);
             commitText = newWord;
@@ -1702,7 +1802,7 @@ private:
             nonPreeditState.pendingShownTextAfterCommit.clear();
         }
 
-        clearComposeState(nonPreeditState);
+        clearComposeState(nonPreeditState, "default");
         return false;
     }
 
@@ -1713,17 +1813,17 @@ private:
         auto &nonPreeditState = state.nonPreeditDelta;
         const RewriteTiming timing = nonPreeditTimingFor(ic, state.program);
         if (hasCtrlAltSuperMeta(nonPreeditKey)) {
-            clearComposeState(nonPreeditState);
+           clearComposeState(nonPreeditState, "ctrl-alt-super");
             return false;
         }
 
         if (nonPreeditKey.isCursorMove() || nonPreeditKey.check(FcitxKey_Delete)) {
-            clearComposeState(nonPreeditState);
+           clearComposeState(nonPreeditState, "cursor-delete");
             return false;
         }
 
         if (nonPreeditKey.check(FcitxKey_Escape)) {
-            clearComposeState(nonPreeditState);
+           clearComposeState(nonPreeditState, "escape");
             return false;
         }
 
@@ -1732,7 +1832,7 @@ private:
                 return false;
             }
             if (!nonPreeditState.hasRewrittenCurrentWord) {
-                clearComposeState(nonPreeditState);
+                clearComposeState(nonPreeditState, "backspace-empty-or-not-rewritten");           
                 return false;
             }
             const auto method = deps_.backspaceInjector->sendBackspaces(
@@ -1757,32 +1857,32 @@ private:
                 nonPreeditKey.check(FcitxKey_KP_Enter) ||
                 nonPreeditKey.check(FcitxKey_ISO_Enter) ||
                 nonPreeditKey.check(FcitxKey_Tab)) {
-                clearComposeState(nonPreeditState);
+               clearComposeState(nonPreeditState, "boundary");
                 return false;
             }
 
             // Only composing chars go to the engine.
             // Non-composing non-boundary chars (e.g. !@#$) clear state and forward.
             if (!isComposingASCII(c)) {
-                clearComposeState(nonPreeditState);
+                clearComposeState(nonPreeditState, "not-composing-ascii");
                 return false;
             }
 
             if (!adapterShared) {
-                clearComposeState(nonPreeditState);
+                clearComposeState(nonPreeditState, "no-adapter");
                 return false;
             }
             adapterShared->setCodeTable(state.codeTable);
             const auto r =
                 adapterShared->processAsciiKey(nonPreeditState.shownText, c);
             if (!r.handled) {
-                clearComposeState(nonPreeditState);
+                clearComposeState(nonPreeditState, "adapter-not-handled");
                 return false;
             }
             return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
         }
 
-        clearComposeState(nonPreeditState);
+       clearComposeState(nonPreeditState, "non-ascii-key");
         return false;
     }
 
