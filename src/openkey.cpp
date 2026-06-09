@@ -600,10 +600,9 @@ static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{1000, 100000};
 static constexpr uint64_t kDeltaPostCommitPumpDelayUsec = 10000;
 
 static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 50000};
-static constexpr RewriteTiming kNonPreeditX11Timing{1000, 50000};
-static constexpr RewriteTiming kNonPreeditFcitx4Timing{1000, 100000};
-static constexpr RewriteTiming kNonPreeditX11BrowserTiming{1000, 100000};
-static constexpr uint64_t kNonPreeditPostCommitPumpDelayUsec = 10000;
+static constexpr RewriteTiming kNonPreeditX11Timing{1000, 80000};
+static constexpr RewriteTiming kNonPreeditX11BrowserTiming{1000, 80000};
+static constexpr uint64_t kNonPreeditPostCommitPumpDelayUsec = 50000;
 
 static bool isRunningOnX11(fcitx::InputContext *ic) {
     (void)ic;
@@ -793,12 +792,6 @@ static DeltaRewriteTiming deltaTimingFor(fcitx::InputContext *ic,
 static RewriteTiming nonPreeditTimingFor(fcitx::InputContext *ic,
                                          const std::string &program) {
     const bool x11 = isRunningOnX11(ic);
-    const bool fcitx4 = isFcitx4Frontend(ic);
-
-    if (fcitx4) {
-        return kNonPreeditFcitx4Timing;
-    }
-
     if (x11 && isBrowserLikeProgram(program)) {
         return kNonPreeditX11BrowserTiming;
     }
@@ -2339,12 +2332,7 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
         return RuntimeMode::Preedit;
     }
 
-    const auto mode =
-        (isRunningOnX11(ic) && isBrowserLikeProgram(normalizedProgram))
-            ? RuntimeMode::Preedit
-            : (nonPreeditServerAvailable()
-                   ? RuntimeMode::NonPreeditBackspaceRewrite
-                   : RuntimeMode::BackspaceRewriteDelta);
+    const auto mode = nonPreeditServerAvailable() ? RuntimeMode::NonPreeditBackspaceRewrite: RuntimeMode::BackspaceRewriteDelta;
     if (writeBack && !normalizedProgram.empty()) {
         appModeMap[normalizedProgram] = mode;
         persistAppModes();
