@@ -1081,6 +1081,436 @@ struct DeltaModeDeps {
         nonPreeditRemoteSchedule;
 };
 
+// Deps shared by PreeditModeHandler and SurroundingTextModeHandler.
+struct SimpleModeHandlerDeps {
+    std::shared_ptr<OpenKeyAdapter> adapter;
+    std::function<bool()> debugEnabled;
+    std::function<bool()> enableMacro;
+    // Called by SurroundingTextModeHandler when it decides to fall back to
+    // preedit mode (too many surrounding-text desync failures).
+    std::function<void(fcitx::InputContext *, OpenKeyState &)> fallbackToPreedit;
+};
+
+// ---------------------------------------------------------------------------
+// PreeditModeHandler
+// ---------------------------------------------------------------------------
+
+class PreeditModeHandler final : public InputModeHandler {
+public:
+    explicit PreeditModeHandler(SimpleModeHandlerDeps deps)
+        : deps_(std::move(deps)) {}
+
+    bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
+                   OpenKeyState &state) override {
+        auto key = event.key().normalize();
+
+        auto commitPreeditAndMaybeAppend = [&](const std::string &suffixUtf8) {
+            if (state.composing.empty()) {
+                return false;
+            }
+            std::string out = state.composing;
+            out += suffixUtf8;
+            ic->commitString(out);
+            state.lastCommitted = state.composing;
+            state.composing.clear();
+            updatePreeditUI(ic, state);
+            event.filterAndAccept();
+            return true;
+        };
+
+        // Navigation / editing keys terminate preedit but are handled by app.
+        if (key.isCursorMove() || key.check(FcitxKey_Delete) ||
+            key.check(FcitxKey_Tab)) {
+            commitAndClearPreedit(ic, state);
+            return false;
+        }
+
+        if (key.check(FcitxKey_BackSpace)) {
+            if (!state.composing.empty()) {
+                const auto len = fcitx::utf8::length(state.composing);
+                if (len > 0) {
+                    auto it = fcitx::utf8::nextNChar(state.composing.begin(), len - 1);
+                    state.composing.erase(it, state.composing.end());
+                } else {
+                    state.composing.clear();
+                }
+                updatePreeditUI(ic, state);
+                event.filterAndAccept();
+                return true;
+            }
+            return false;
+        }
+
+        if (key.check(FcitxKey_Escape)) {
+            if (!state.composing.empty()) {
+                state.composing.clear();
+                updatePreeditUI(ic, state);
+                event.filterAndAccept();
+                return true;
+            }
+            return false;
+        }
+
+        if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
+            key.check(FcitxKey_ISO_Enter)) {
+            commitAndClearPreedit(ic, state);
+            return false;
+        }
+
+        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
+        const std::string utf8 = fcitx::Key::keySymToUTF8(key.sym());
+
+        if (!state.composing.empty() && (utf8.empty() || uni > 0x7F)) {
+            commitAndClearPreedit(ic, state);
+            return false;
+        }
+
+        if (uni >= 0x20 && uni <= 0x7E) {
+            const char c = static_cast<char>(uni);
+
+            if (c == ' ') {
+                if (deps_.enableMacro && deps_.enableMacro() && !state.composing.empty()) {
+                    std::string replacement;
+                    if (deps_.adapter->expandMacro(state.composing, replacement)) {
+                        state.composing = std::move(replacement);
+                    }
+                }
+                return commitPreeditAndMaybeAppend(" ");
+            }
+            if (!isComposingASCII(c)) {
+                const std::string boundaryUtf8 = fcitx::Key::keySymToUTF8(key.sym());
+                if (deps_.enableMacro && deps_.enableMacro() && isMacroTriggerKey(c) &&
+                    !state.composing.empty()) {
+                    std::string replacement;
+                    if (deps_.adapter->expandMacro(state.composing, replacement)) {
+                        state.composing = std::move(replacement);
+                    }
+                }
+                if (!boundaryUtf8.empty()) {
+                    return commitPreeditAndMaybeAppend(boundaryUtf8);
+                }
+                commitAndClearPreedit(ic, state);
+                return false;
+            }
+
+            auto r = deps_.adapter->processAsciiKey(state.composing, c);
+            if (!r.handled) {
+                return false;
+            }
+            state.composing = std::move(r.newWord);
+            updatePreeditUI(ic, state);
+            event.filterAndAccept();
+            return true;
+        }
+
+        return false;
+    }
+
+    void reset(OpenKeyState &state) override {
+        state.composing.clear();
+    }
+
+private:
+    void updatePreeditUI(fcitx::InputContext *ic, const OpenKeyState &state) {
+        auto &panel = ic->inputPanel();
+        panel.reset();
+
+        if (state.composing.empty()) {
+            ic->updatePreedit();
+            ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
+            return;
+        }
+
+        fcitx::Text text;
+        text.append(state.composing, fcitx::TextFormatFlag::Underline);
+        text.setCursor(static_cast<int>(state.composing.size()));
+
+        if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
+            panel.setClientPreedit(text);
+        } else {
+            panel.setPreedit(text);
+        }
+
+        ic->updatePreedit();
+        ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
+    }
+
+    void commitAndClearPreedit(fcitx::InputContext *ic, OpenKeyState &state) {
+        if (state.composing.empty()) {
+            return;
+        }
+        ic->commitString(state.composing);
+        state.lastCommitted = state.composing;
+        state.composing.clear();
+        updatePreeditUI(ic, state);
+    }
+
+    SimpleModeHandlerDeps deps_;
+};
+
+// ---------------------------------------------------------------------------
+// SurroundingTextModeHandler
+// ---------------------------------------------------------------------------
+
+class SurroundingTextModeHandler final : public InputModeHandler {
+public:
+    explicit SurroundingTextModeHandler(SimpleModeHandlerDeps deps)
+        : deps_(std::move(deps)) {}
+
+    bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
+                   OpenKeyState &state) override {
+        auto key = event.key().normalize();
+
+        // Preedit buffer should be empty in surrounding mode.
+        state.composing.clear();
+
+        const bool debug = deps_.debugEnabled && deps_.debugEnabled();
+
+        if (debug) {
+            FCITX_INFO() << "openkey: st key program=" << state.program
+                         << " sym=" << key.sym()
+                         << " rollbackDisplay=" << state.rollbackDisplay
+                         << " rollbackWord=" << state.rollbackWord;
+        }
+
+        if (shouldSkipDSTOnWayland(ic, state.program)) {
+            state.macroBuffer.clear();
+            state.rollbackWord.clear();
+            state.rollbackDisplay.clear();
+            state.noSeedNextWord = false;
+            return false;
+        }
+
+        if (key.check(FcitxKey_Delete) || key.isCursorMove()) {
+            state.macroBuffer.clear();
+            state.rollbackWord.clear();
+            state.rollbackDisplay.clear();
+            state.noSeedNextWord = false;
+            return false;
+        }
+
+        if (key.check(FcitxKey_BackSpace)) {
+            if (!state.rollbackWord.empty()) {
+                if (!fcitx::utf8::validate(state.rollbackWord) ||
+                    !fcitx::utf8::validate(state.rollbackDisplay)) {
+                    state.rollbackWord.clear();
+                    state.rollbackDisplay.clear();
+                    return false;
+                }
+                const auto len = fcitx::utf8::length(state.rollbackWord);
+                if (len > 0) {
+                    auto it = fcitx::utf8::nextNChar(state.rollbackWord.begin(), len - 1);
+                    state.rollbackWord.erase(it, state.rollbackWord.end());
+                } else {
+                    state.rollbackWord.clear();
+                }
+
+                std::string newDisplay = state.rollbackWord;
+                const std::size_t prefixLen =
+                    commonPrefixBytesUTF8Boundary(state.rollbackDisplay, newDisplay);
+                const unsigned int deleteChars =
+                    utf8CharCount(state.rollbackDisplay.substr(prefixLen));
+                if (deleteChars > 128) {
+                    state.rollbackWord.clear();
+                    state.rollbackDisplay.clear();
+                    state.surroundingFailures++;
+                    maybeCallFallback(ic, state);
+                    return false;
+                }
+                if (deleteChars > 0) {
+                    ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+                }
+                if (newDisplay.size() > prefixLen) {
+                    ic->commitString(newDisplay.substr(prefixLen));
+                }
+                state.rollbackDisplay = std::move(newDisplay);
+                if (debug) {
+                    FCITX_INFO() << "openkey: st bs program=" << state.program
+                                 << " deleteChars=" << deleteChars
+                                 << " newDisplay=" << state.rollbackDisplay;
+                }
+                event.filterAndAccept();
+                return true;
+            }
+            if (!state.macroBuffer.empty()) {
+                state.macroBuffer.pop_back();
+            }
+            return false;
+        }
+
+        if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
+            key.check(FcitxKey_ISO_Enter)) {
+            state.macroBuffer.clear();
+            state.rollbackWord.clear();
+            state.rollbackDisplay.clear();
+            state.noSeedNextWord = false;
+            return false;
+        }
+
+        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
+        if (!(uni >= 0x20 && uni <= 0x7E)) {
+            state.macroBuffer.clear();
+            state.rollbackWord.clear();
+            state.rollbackDisplay.clear();
+            state.noSeedNextWord = false;
+            return false;
+        }
+        const char c = static_cast<char>(uni);
+
+        if (isComposingASCII(c) && !state.rollbackDisplay.empty()) {
+            const auto &st = ic->surroundingText();
+            if (!st.isValid() || st.cursor() != st.anchor() ||
+                !fcitx::utf8::validate(st.text()) ||
+                st.cursor() > fcitx::utf8::length(st.text())) {
+                state.rollbackWord.clear();
+                state.rollbackDisplay.clear();
+                state.surroundingFailures += 3;
+                maybeCallFallback(ic, state);
+                return false;
+            }
+            WordSegment seg;
+            if (!extractWordBeforeCursor(st.text(), st.cursor(), seg) ||
+                seg.word != state.rollbackDisplay) {
+                if (debug) {
+                    FCITX_INFO() << "openkey: st desync program=" << state.program
+                                 << " expected=" << state.rollbackDisplay
+                                 << " actual=" << seg.word;
+                }
+                state.rollbackWord.clear();
+                state.rollbackDisplay.clear();
+                state.surroundingFailures += 3;
+                maybeCallFallback(ic, state);
+                return false;
+            }
+        }
+
+        if (c == ' ' || c == '\t') {
+            if (deps_.enableMacro && deps_.enableMacro() && !state.rollbackDisplay.empty()) {
+                std::string replacement;
+                if (deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
+                    const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
+                    if (deleteChars > 0 && deleteChars <= 128) {
+                        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+                        ic->commitString(replacement);
+                    }
+                }
+            }
+            state.macroBuffer.clear();
+            state.rollbackWord.clear();
+            state.rollbackDisplay.clear();
+            state.noSeedNextWord = true;
+            return false;
+        }
+
+        if (!isComposingASCII(c)) {
+            if (deps_.enableMacro && deps_.enableMacro() && isMacroTriggerKey(c) &&
+                !state.rollbackDisplay.empty()) {
+                std::string replacement;
+                if (deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
+                    const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
+                    if (deleteChars > 0 && deleteChars <= 128) {
+                        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+                        ic->commitString(replacement);
+                    }
+                }
+            }
+            state.macroBuffer.clear();
+            state.rollbackWord.clear();
+            state.rollbackDisplay.clear();
+            state.noSeedNextWord = true;
+            return false;
+        }
+
+        if (state.noSeedNextWord) {
+            state.noSeedNextWord = false;
+        } else if (state.rollbackWord.empty()) {
+            auto &st = ic->surroundingText();
+            if (st.isValid() && st.cursor() == st.anchor()) {
+                WordSegment seg;
+                if (extractWordBeforeCursor(st.text(), st.cursor(), seg)) {
+                    state.rollbackWord = seg.word;
+                    state.rollbackDisplay = seg.word;
+                    if (debug) {
+                        FCITX_INFO() << "openkey: st seed program=" << state.program
+                                     << " st.cursor=" << st.cursor()
+                                     << " st.textLen=" << fcitx::utf8::length(st.text())
+                                     << " seed=" << seg.word;
+                    }
+                }
+            }
+        }
+
+        auto r = deps_.adapter->processAsciiKey(state.rollbackWord, c);
+        if (!r.handled) {
+            state.rollbackWord.clear();
+            state.rollbackDisplay.clear();
+            return false;
+        }
+        if (!fcitx::utf8::validate(r.newWord)) {
+            if (debug) {
+                FCITX_WARN() << "openkey: invalid utf8 from adapter program="
+                             << state.program;
+            }
+            state.rollbackWord.clear();
+            state.rollbackDisplay.clear();
+            return false;
+        }
+
+        const std::size_t prefixLen =
+            commonPrefixBytesUTF8Boundary(state.rollbackDisplay, r.newWord);
+        const unsigned int deleteChars =
+            utf8CharCount(state.rollbackDisplay.substr(prefixLen));
+        if (deleteChars > 128) {
+            if (debug) {
+                FCITX_WARN() << "openkey: deleteChars too large program="
+                             << state.program << " deleteChars=" << deleteChars
+                             << " rollbackDisplay=" << state.rollbackDisplay
+                             << " newWord=" << r.newWord;
+            }
+            state.rollbackWord.clear();
+            state.rollbackDisplay.clear();
+            state.surroundingFailures++;
+            maybeCallFallback(ic, state);
+            return false;
+        }
+        if (deleteChars > 0) {
+            ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+        }
+        if (r.newWord.size() > prefixLen) {
+            ic->commitString(r.newWord.substr(prefixLen));
+        }
+        if (debug) {
+            FCITX_INFO() << "openkey: st apply program=" << state.program
+                         << " deleteChars=" << deleteChars
+                         << " commitDelta=" << r.newWord.substr(prefixLen)
+                         << " newWord=" << r.newWord;
+        }
+
+        state.rollbackWord = r.newWord;
+        state.rollbackDisplay = r.newWord;
+        state.lastCommitted = state.rollbackDisplay;
+        state.surroundingFailures = 0;
+        event.filterAndAccept();
+        return true;
+    }
+
+    void reset(OpenKeyState &state) override {
+        state.macroBuffer.clear();
+        state.rollbackWord.clear();
+        state.rollbackDisplay.clear();
+        state.noSeedNextWord = false;
+    }
+
+private:
+    void maybeCallFallback(fcitx::InputContext *ic, OpenKeyState &state) {
+        if (state.surroundingFailures >= 3 && deps_.fallbackToPreedit) {
+            deps_.fallbackToPreedit(ic, state);
+        }
+    }
+
+    SimpleModeHandlerDeps deps_;
+};
+
 
 class BackspaceRewriteModeHandler final : public InputModeHandler {
 public:
@@ -1995,6 +2425,29 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     nonPreeditBackspaceRewriteHandler_ =
         std::make_unique<NonPreeditBackspaceRewriteModeHandler>(
             std::move(nonPreeditDeltaDeps));
+
+    SimpleModeHandlerDeps simpleDeps;
+    simpleDeps.adapter = adapter_;
+    simpleDeps.debugEnabled = [this]() { return debugEnabled(); };
+    simpleDeps.enableMacro = [this]() { return config_.enableMacro.value(); };
+    simpleDeps.fallbackToPreedit = [this](fcitx::InputContext *ic, OpenKeyState &state) {
+        if (debugEnabled()) {
+            FCITX_INFO() << "openkey: fallback to preedit program="
+                         << state.program
+                         << " reason=surrounding_failures";
+        }
+        state.delta.clear();
+        state.nonPreeditDelta.clear();
+        state.rollbackWord.clear();
+        state.rollbackDisplay.clear();
+        state.mode = RuntimeMode::Preedit;
+        if (!state.program.empty()) {
+            setAppModeForProgram(ic, state.program, RuntimeMode::Preedit);
+            persistAppModes();
+        }
+    };
+    preeditHandler_ = std::make_unique<PreeditModeHandler>(simpleDeps);
+    surroundingTextHandler_ = std::make_unique<SurroundingTextModeHandler>(std::move(simpleDeps));
     reloadConfig();
     if (remoteNonPreeditCoordinator_) {
         remoteNonPreeditCoordinator_->ensureAvailableOrStartOnce();
@@ -2285,7 +2738,6 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
     }
 
     state->codeTable = toOpenKeyCodeTable(config_.codeTable.value());
-    state->lastCapability = ic->capabilityFlags();
     state->mode = decideMode(ic, *state);
     state->autoMode = state->mode;
     state->modeDecided = true;
@@ -2352,429 +2804,9 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
     return mode;
 }
 
-void OpenKeyEngine::updatePreeditUI(fcitx::InputContext *ic,
-                                   const OpenKeyState &state) {
-    auto &panel = ic->inputPanel();
-    panel.reset();
 
-    if (state.composing.empty()) {
-        ic->updatePreedit();
-        ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
-        return;
-    }
 
-    fcitx::Text text;
-    text.append(state.composing, fcitx::TextFormatFlag::Underline);
-    text.setCursor(static_cast<int>(state.composing.size()));
 
-    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
-        panel.setClientPreedit(text);
-    } else {
-        panel.setPreedit(text);
-    }
-
-    ic->updatePreedit();
-    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
-}
-
-void OpenKeyEngine::commitAndClearPreedit(fcitx::InputContext *ic,
-                                         OpenKeyState &state) {
-    if (state.composing.empty()) {
-        return;
-    }
-    ic->commitString(state.composing);
-    state.lastCommitted = state.composing;
-    state.composing.clear();
-    updatePreeditUI(ic, state);
-}
-
-bool OpenKeyEngine::handlePreedit(fcitx::InputContext *ic, fcitx::KeyEvent &event,
-                                 OpenKeyState &state) {
-    auto key = event.key().normalize();
-
-    auto commitPreeditAndMaybeAppend = [&](const std::string &suffixUtf8) {
-        if (state.composing.empty()) {
-            return false;
-        }
-        std::string out = state.composing;
-        out += suffixUtf8;
-        ic->commitString(out);
-        state.lastCommitted = state.composing;
-        state.composing.clear();
-        updatePreeditUI(ic, state);
-        event.filterAndAccept();
-        return true;
-    };
-
-    // Navigation / editing keys should terminate preedit but still be handled
-    // by application.
-    if (key.isCursorMove() || key.check(FcitxKey_Delete) ||
-        key.check(FcitxKey_Tab)) {
-        commitAndClearPreedit(ic, state);
-        return false;
-    }
-
-    if (key.check(FcitxKey_BackSpace)) {
-        if (!state.composing.empty()) {
-            // delete one UTF-8 char
-            const auto len = fcitx::utf8::length(state.composing);
-            if (len > 0) {
-                auto it = fcitx::utf8::nextNChar(state.composing.begin(), len - 1);
-                state.composing.erase(it, state.composing.end());
-            } else {
-                state.composing.clear();
-            }
-            updatePreeditUI(ic, state);
-            event.filterAndAccept();
-            return true;
-        }
-        return false;
-    }
-
-    if (key.check(FcitxKey_Escape)) {
-        if (!state.composing.empty()) {
-            state.composing.clear();
-            updatePreeditUI(ic, state);
-            event.filterAndAccept();
-            return true;
-        }
-        return false;
-    }
-
-    if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
-        key.check(FcitxKey_ISO_Enter)) {
-        // Commit composing, then let client handle Enter.
-        commitAndClearPreedit(ic, state);
-        return false;
-    }
-
-    const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
-    const std::string utf8 = fcitx::Key::keySymToUTF8(key.sym());
-
-    // Commit composing before any non-ascii printable char.
-    if (!state.composing.empty() && (utf8.empty() || uni > 0x7F)) {
-        commitAndClearPreedit(ic, state);
-        return false;
-    }
-
-    if (uni >= 0x20 && uni <= 0x7E) {
-        const char c = static_cast<char>(uni);
-
-        // Break keys.
-        //
-        // On some frontends (notably Wayland), the boundary key that ended the
-        // preedit may not reliably reach the client. Commit the boundary
-        // character together with the preedit string to avoid requiring users
-        // to press the key twice and to avoid selection/range edge cases with
-        // multiple consecutive commitString() calls.
-        if (c == ' ') {
-            if (config_.enableMacro.value() && !state.composing.empty()) {
-                std::string replacement;
-                if (adapter_->expandMacro(state.composing, replacement)) {
-                    state.composing = std::move(replacement);
-                }
-            }
-            return commitPreeditAndMaybeAppend(" ");
-        }
-        if (!isComposingASCII(c)) {
-            const std::string boundaryUtf8 = fcitx::Key::keySymToUTF8(key.sym());
-            if (config_.enableMacro.value() && isMacroTriggerKey(c) &&
-                !state.composing.empty()) {
-                std::string replacement;
-                if (adapter_->expandMacro(state.composing, replacement)) {
-                    state.composing = std::move(replacement);
-                }
-            }
-            if (!boundaryUtf8.empty()) {
-                return commitPreeditAndMaybeAppend(boundaryUtf8);
-            }
-            commitAndClearPreedit(ic, state);
-            return false;
-        }
-
-        auto r = adapter_->processAsciiKey(state.composing, c);
-        if (!r.handled) {
-            return false;
-        }
-        state.composing = std::move(r.newWord);
-        updatePreeditUI(ic, state);
-        event.filterAndAccept();
-        return true;
-    }
-
-    return false;
-}
-
-bool OpenKeyEngine::handleSurroundingText(fcitx::InputContext *ic,
-                                         fcitx::KeyEvent &event,
-                                         OpenKeyState &state) {
-    auto key = event.key().normalize();
-
-    // Preedit buffer should be empty in surrounding mode.
-    state.composing.clear();
-
-    if (debugEnabled()) {
-        FCITX_INFO() << "openkey: st key program=" << state.program
-                     << " sym=" << key.sym()
-                     << " rollbackDisplay=" << state.rollbackDisplay
-                     << " rollbackWord=" << state.rollbackWord;
-    }
-
-    if (shouldSkipDSTOnWayland(ic, state.program)) {
-        state.macroBuffer.clear();
-        state.rollbackWord.clear();
-        state.rollbackDisplay.clear();
-        state.noSeedNextWord = false;
-        return false;
-    }
-
-    if (key.check(FcitxKey_Delete) ||
-        key.isCursorMove()) {
-        state.macroBuffer.clear();
-        state.rollbackWord.clear();
-        state.rollbackDisplay.clear();
-        state.noSeedNextWord = false;
-        return false;
-    }
-
-    if (key.check(FcitxKey_BackSpace)) {
-        if (!state.rollbackWord.empty()) {
-            if (!fcitx::utf8::validate(state.rollbackWord) ||
-                !fcitx::utf8::validate(state.rollbackDisplay)) {
-                state.rollbackWord.clear();
-                state.rollbackDisplay.clear();
-                return false;
-            }
-            // delete one UTF-8 char from rollbackWord
-            const auto len = fcitx::utf8::length(state.rollbackWord);
-            if (len > 0) {
-                auto it =
-                    fcitx::utf8::nextNChar(state.rollbackWord.begin(), len - 1);
-                state.rollbackWord.erase(it, state.rollbackWord.end());
-            } else {
-                state.rollbackWord.clear();
-            }
-
-            std::string newDisplay = state.rollbackWord;
-            const std::size_t prefixLen =
-                commonPrefixBytesUTF8Boundary(state.rollbackDisplay, newDisplay);
-            const unsigned int deleteChars =
-                utf8CharCount(state.rollbackDisplay.substr(prefixLen));
-            if (deleteChars > 128) {
-                state.rollbackWord.clear();
-                state.rollbackDisplay.clear();
-                state.surroundingFailures++;
-                return false;
-            }
-            if (deleteChars > 0) {
-                ic->deleteSurroundingText(-static_cast<int>(deleteChars),
-                                          deleteChars);
-            }
-            if (newDisplay.size() > prefixLen) {
-                ic->commitString(newDisplay.substr(prefixLen));
-            }
-            state.rollbackDisplay = std::move(newDisplay);
-            if (debugEnabled()) {
-                FCITX_INFO() << "openkey: st bs program=" << state.program
-                             << " deleteChars=" << deleteChars
-                             << " newDisplay=" << state.rollbackDisplay;
-            }
-            event.filterAndAccept();
-            return true;
-        }
-        if (!state.macroBuffer.empty()) {
-            state.macroBuffer.pop_back();
-        }
-        // no rollback state: let app handle backspace
-        return false;
-    }
-
-    if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
-        key.check(FcitxKey_ISO_Enter)) {
-        state.macroBuffer.clear();
-        state.rollbackWord.clear();
-        state.rollbackDisplay.clear();
-        state.noSeedNextWord = false;
-        return false;
-    }
-
-    const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
-    if (!(uni >= 0x20 && uni <= 0x7E)) {
-        state.macroBuffer.clear();
-        state.rollbackWord.clear();
-        state.rollbackDisplay.clear();
-        state.noSeedNextWord = false;
-        return false;
-    }
-    const char c = static_cast<char>(uni);
-
-    // Keep rollback state in sync with actual surrounding text. Some clients
-    // may report surrounding text but ignore deleteSurroundingText in some
-    // fields, causing duplicate characters if we keep applying deltas. Detect
-    // the mismatch and count it as a failure so we can fallback to preedit mode
-    // for that app.
-    if (isComposingASCII(c) && !state.rollbackDisplay.empty()) {
-        const auto &st = ic->surroundingText();
-        if (!st.isValid() || st.cursor() != st.anchor() ||
-            !fcitx::utf8::validate(st.text()) ||
-            st.cursor() > fcitx::utf8::length(st.text())) {
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.surroundingFailures += 3;
-            return false;
-        }
-        WordSegment seg;
-        if (!extractWordBeforeCursor(st.text(), st.cursor(), seg) ||
-            seg.word != state.rollbackDisplay) {
-            if (debugEnabled()) {
-                FCITX_INFO() << "openkey: st desync program=" << state.program
-                             << " expected=" << state.rollbackDisplay
-                             << " actual=" << seg.word;
-            }
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            // Desync is a strong signal the client can't reliably apply our
-            // deleteSurroundingText deltas. Escalate quickly to fallback mode.
-            state.surroundingFailures += 3;
-            return false;
-        }
-    }
-
-    // Do not try to "compose" across whitespace.
-    if (c == ' ' || c == '\t') {
-        if (config_.enableMacro.value() && !state.rollbackDisplay.empty()) {
-            std::string replacement;
-            if (adapter_->expandMacro(state.rollbackDisplay, replacement)) {
-                const unsigned int deleteChars =
-                    utf8CharCount(state.rollbackDisplay);
-                if (deleteChars > 0 && deleteChars <= 128) {
-                    ic->deleteSurroundingText(-static_cast<int>(deleteChars),
-                                              deleteChars);
-                    ic->commitString(replacement);
-                }
-            }
-        }
-        state.macroBuffer.clear();
-        state.rollbackWord.clear();
-        state.rollbackDisplay.clear();
-        state.noSeedNextWord = true;
-        return false;
-    }
-
-    if (!isComposingASCII(c)) {
-        if (config_.enableMacro.value() && isMacroTriggerKey(c) &&
-            !state.rollbackDisplay.empty()) {
-            std::string replacement;
-            if (adapter_->expandMacro(state.rollbackDisplay, replacement)) {
-                const unsigned int deleteChars =
-                    utf8CharCount(state.rollbackDisplay);
-                if (deleteChars > 0 && deleteChars <= 128) {
-                    ic->deleteSurroundingText(-static_cast<int>(deleteChars),
-                                              deleteChars);
-                    ic->commitString(replacement);
-                }
-            }
-        }
-        state.macroBuffer.clear();
-        // Let application handle punctuation and break keys.
-        state.rollbackWord.clear();
-        state.rollbackDisplay.clear();
-        state.noSeedNextWord = true;
-        return false;
-    }
-
-    if (state.noSeedNextWord) {
-        // We just ended a word boundary (space/punctuation) and the next
-        // composing key should start a new word. Some clients (e.g. LibreOffice)
-        // may not report trailing whitespace in surrounding text reliably, so
-        // seeding from surrounding text would accidentally reuse previous word.
-        state.noSeedNextWord = false;
-    } else if (state.rollbackWord.empty()) {
-        auto &st = ic->surroundingText();
-        if (st.isValid() && st.cursor() == st.anchor()) {
-            WordSegment seg;
-            if (extractWordBeforeCursor(st.text(), st.cursor(), seg)) {
-                state.rollbackWord = seg.word;
-                state.rollbackDisplay = seg.word;
-                if (debugEnabled()) {
-                    FCITX_INFO() << "openkey: st seed program=" << state.program
-                                 << " st.cursor=" << st.cursor()
-                                 << " st.textLen=" << fcitx::utf8::length(st.text())
-                                 << " seed=" << seg.word;
-                }
-            }
-        }
-    }
-
-    auto r = adapter_->processAsciiKey(state.rollbackWord, c);
-    if (!r.handled) {
-        state.rollbackWord.clear();
-        state.rollbackDisplay.clear();
-        return false;
-    }
-    if (!fcitx::utf8::validate(r.newWord)) {
-        if (debugEnabled()) {
-            FCITX_WARN() << "openkey: invalid utf8 from adapter program="
-                         << state.program;
-        }
-        state.rollbackWord.clear();
-        state.rollbackDisplay.clear();
-        return false;
-    }
-
-    // Direct rollback: only delete the delta part and commit the delta part.
-    const std::size_t prefixLen =
-        commonPrefixBytesUTF8Boundary(state.rollbackDisplay, r.newWord);
-    const unsigned int deleteChars =
-        utf8CharCount(state.rollbackDisplay.substr(prefixLen));
-    if (deleteChars > 128) {
-        // Safety guard: avoid deleting an unreasonable range if client state is
-        // out-of-sync.
-        if (debugEnabled()) {
-            FCITX_WARN() << "openkey: deleteChars too large program="
-                         << state.program << " deleteChars=" << deleteChars
-                         << " rollbackDisplay=" << state.rollbackDisplay
-                         << " newWord=" << r.newWord;
-        }
-        state.rollbackWord.clear();
-        state.rollbackDisplay.clear();
-        state.surroundingFailures++;
-        return false;
-    }
-    if (deleteChars > 0) {
-        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-    }
-    if (r.newWord.size() > prefixLen) {
-        ic->commitString(r.newWord.substr(prefixLen));
-    }
-    if (debugEnabled()) {
-        FCITX_INFO() << "openkey: st apply program=" << state.program
-                     << " deleteChars=" << deleteChars
-                     << " commitDelta=" << r.newWord.substr(prefixLen)
-                     << " newWord=" << r.newWord;
-    }
-
-    state.rollbackWord = r.newWord;
-    state.rollbackDisplay = r.newWord;
-    state.lastCommitted = state.rollbackDisplay;
-    state.surroundingFailures = 0;
-    event.filterAndAccept();
-    return true;
-}
-
-bool OpenKeyEngine::handleBackspaceRewrite(fcitx::InputContext *ic,
-                                          fcitx::KeyEvent &event,
-                                          OpenKeyState &state) {
-    if (state.mode == RuntimeMode::BackspaceRewriteDelta &&
-        backspaceRewriteHandler_) {
-        return backspaceRewriteHandler_->handleKey(ic, event, state);
-    }
-    if (state.mode == RuntimeMode::NonPreeditBackspaceRewrite &&
-        nonPreeditBackspaceRewriteHandler_) {
-        return nonPreeditBackspaceRewriteHandler_->handleKey(ic, event, state);
-    }
-    return false;
-}
 
 void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                              fcitx::KeyEvent &event) {
@@ -2789,7 +2821,6 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
 
     // Ensure we have a baseline auto mode for this context.
     if (!state->modeDecided) {
-        state->lastCapability = ic->capabilityFlags();
         state->mode = decideMode(ic, *state, false);
         state->autoMode = state->mode;
         state->modeDecided = true;
@@ -2947,7 +2978,7 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     if (hasCtrlAltSuperMeta(key)) {
         if (state->modeDecided && state->mode == RuntimeMode::Preedit &&
             !state->composing.empty()) {
-            commitAndClearPreedit(ic, *state);
+            preeditHandler_->reset(*state);
         }
         return;
     }
@@ -2970,31 +3001,21 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         return;
     case RuntimeMode::Preedit:
         adapter_->setCodeTable(state->codeTable);
-        handled = handlePreedit(ic, event, *state);
+        if (preeditHandler_) {
+            handled = preeditHandler_->handleKey(ic, event, *state);
+        }
         return;
     case RuntimeMode::SurroundingText:
         adapter_->setCodeTable(state->codeTable);
-        handled = handleSurroundingText(ic, event, *state);
-        if (!handled) {
-            // If surrounding text is flaky for this app, blacklist it and
-            // demote to preedit. This is a final fallback.
-            if (state->surroundingFailures >= 3) {
-                if (debugEnabled()) {
-                    FCITX_INFO() << "openkey: fallback to preedit program="
-                                 << state->program
-                                 << " reason=surrounding_failures";
-                }
-                state->delta.clear();
-                state->nonPreeditDelta.clear();
-                state->rollbackWord.clear();
-                state->rollbackDisplay.clear();
-                state->mode = RuntimeMode::Preedit;
-                if (!state->program.empty()) {
-                    setAppModeForProgram(ic, state->program, RuntimeMode::Preedit);
-                    persistAppModes();
-                }
+        if (surroundingTextHandler_) {
+            handled = surroundingTextHandler_->handleKey(ic, event, *state);
+            if (!handled && state->surroundingFailures >= 3) {
+                // Too many desync failures — fall back to preedit for this app.
+                // The handler has already updated state->mode via fallbackToPreedit.
                 adapter_->setCodeTable(state->codeTable);
-                (void)handlePreedit(ic, event, *state);
+                if (preeditHandler_) {
+                    (void)preeditHandler_->handleKey(ic, event, *state);
+                }
             }
         }
         return;
