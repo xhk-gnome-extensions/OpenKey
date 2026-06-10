@@ -151,6 +151,7 @@ enum class RuntimeMode {
     BackspaceRewriteDelta,
     NonPreeditBackspaceRewrite,
     SurroundingText,
+    BrowserWayland,
     Preedit,
     DirectCommit,
 };
@@ -260,10 +261,7 @@ struct OpenKeyState : public fcitx::InputContextProperty {
     RuntimeMode autoMode = RuntimeMode::SurroundingText;
     bool manualMode = false;
     bool modeDecided = false;
-    bool surroundingReliable = true;
-    fcitx::CapabilityFlags lastCapability;
     std::string program;
-    int surroundingFailures = 0;
     int codeTable = 0;
 };
 
@@ -308,6 +306,9 @@ private:
     // InputContext::program() is empty (common on Wayland for some clients).
     std::unique_ptr<FocusedAppBridge> focusedAppBridge_;
 
+    std::unique_ptr<InputModeHandler> preeditHandler_;
+    std::unique_ptr<InputModeHandler> surroundingTextHandler_;
+    std::unique_ptr<InputModeHandler> browserWaylandHandler_;
     std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
     std::unique_ptr<InputModeHandler> nonPreeditBackspaceRewriteHandler_;
 
@@ -326,10 +327,7 @@ private:
 
     RuntimeMode decideMode(fcitx::InputContext *ic, OpenKeyState &state,
                              bool writeBack = true);
-    bool handlePreedit(fcitx::InputContext *ic, fcitx::KeyEvent &event,
-                       OpenKeyState &state);
-    bool handleSurroundingText(fcitx::InputContext *ic, fcitx::KeyEvent &event,
-                               OpenKeyState &state);
+    RuntimeMode firstManualMode() const;
     bool handleBackspaceRewrite(fcitx::InputContext *ic,
                                 fcitx::KeyEvent &event, OpenKeyState &state);
     bool scheduleRemoteNonPreeditRewrite(fcitx::InputContext *ic, OpenKeyState &state,
@@ -338,9 +336,6 @@ private:
                                     uint64_t commitDelayUsec);
     void handleRemoteNonPreeditDone(fcitx::InputContext *ic, uint64_t sessionId,
                                uint64_t txId);
-
-    void updatePreeditUI(fcitx::InputContext *ic, const OpenKeyState &state);
-    void commitAndClearPreedit(fcitx::InputContext *ic, OpenKeyState &state);
 };
 
 } // namespace openkey
