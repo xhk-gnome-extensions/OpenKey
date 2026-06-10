@@ -597,12 +597,12 @@ static constexpr DeltaRewriteTiming kDeltaX11Timing{1000, 50000};
 static constexpr DeltaRewriteTiming kDeltaWaylandFcitx4Timing{1000, 100000};
 static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{1000, 100000};
 static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{1000, 100000};
-static constexpr uint64_t kDeltaPostCommitPumpDelayUsec = 10000;
+static constexpr uint64_t kDeltaPostCommitPumpDelayUsec = 20000;
 
-static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 50000};
+static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 20000};
 static constexpr RewriteTiming kNonPreeditX11Timing{1000, 80000};
 static constexpr RewriteTiming kNonPreeditX11BrowserTiming{1000, 80000};
-static constexpr uint64_t kNonPreeditPostCommitPumpDelayUsec = 50000;
+static constexpr uint64_t kNonPreeditPostCommitPumpDelayUsec = 20000;
 
 static bool isRunningOnX11(fcitx::InputContext *ic) {
     (void)ic;
@@ -1089,81 +1089,87 @@ public:
 
     bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
                OpenKeyState &state) override {
-    auto key = event.rawKey();
-    auto normKey = event.key().normalize();
+        auto key = event.rawKey();
+        auto normKey = event.key().normalize();
 
-    auto isBackspace = [&]() {
-        return key.check(FcitxKey_BackSpace) || normKey.check(FcitxKey_BackSpace);
-    };
+        auto isBackspace = [&]() {
+            return key.check(FcitxKey_BackSpace) || normKey.check(FcitxKey_BackSpace);
+        };
 
-    if (event.isRelease()) {
-        return false;
-    }
+        if (event.isRelease()) {
+            return false;
+        }
 
-    if (hasCtrlAltSuperMeta(key)) {
-        return false;
-    }
+        if (hasCtrlAltSuperMeta(key)) {
+            return false;
+        }
 
-    const auto adapterShared = deps_.adapter;
-    const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-    auto &deltaState = state.delta;
+        const auto adapterShared = deps_.adapter;
+        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
+        auto &deltaState = state.delta;
 
-    if (deltaState.waitingBackspaceAck) {
-        if (isBackspace()) {
-            deltaState.seenBackspaces++;
-            if (deltaState.seenBackspaces < deltaState.expectedBackspaces) {
-                return false;
+        if (deltaState.waitingBackspaceAck) {
+            if (isBackspace()) {
+                deltaState.seenBackspaces++;
+                if (deltaState.seenBackspaces < deltaState.expectedBackspaces) {
+                    return false;
+                }
+
+                deltaState.ackTimeoutTimer.reset();
+                event.filterAndAccept();
+
+                const DeltaRewriteTiming timing = deltaTimingFor(ic, state.program);
+                if (isXimFrontend(ic)) {
+                    scheduleFinishPendingBackspaceCommit(ic, state, timing.commitDelayUsec);
+                } else {
+                    finishPendingBackspaceCommit(ic, state, timing.commitDelayUsec);
+                }
+                return true;
             }
 
-            deltaState.ackTimeoutTimer.reset();
+            deltaState.queuedKeys.push_back(key);
             event.filterAndAccept();
-
-            const DeltaRewriteTiming timing = deltaTimingFor(ic, state.program);
-            if (isXimFrontend(ic)) {
-                scheduleFinishPendingBackspaceCommit(ic, state, timing.commitDelayUsec);
-            } else {
-                finishPendingBackspaceCommit(ic, state, timing.commitDelayUsec);
-            }
             return true;
         }
 
-        deltaState.queuedKeys.push_back(key);
-        event.filterAndAccept();
-        return true;
-    }
+        if (deltaState.rewriteLock) {
+            deltaState.queuedKeys.push_back(key);
+            event.filterAndAccept();
+            return true;
+        }
 
-    if (deltaState.rewriteLock) {
-        deltaState.queuedKeys.push_back(key);
-        event.filterAndAccept();
-        return true;
-    }
+        if (isBackspace()) {
+            clearWordState(deltaState);
+            return false;
+        }
 
-    if (isBackspace()) {
-        clearWordState(deltaState);
+        if (key.check(FcitxKey_Shift_L) || key.check(FcitxKey_Shift_R) ||
+            normKey.check(FcitxKey_Shift_L) || normKey.check(FcitxKey_Shift_R)) {
+            return false;
+        }
+
+        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
+
+        if (!(uni >= 0x20 && uni <= 0x7E)) {
+            clearWordState(deltaState);
+            return false;
+        }
+
+        if (uni >= 0x20 && uni <= 0x7E) {
+            deltaState.queuedKeys.push_back(key);
+            event.filterAndAccept();
+            pumpQueue(ic, state, adapterShared, debug);
+            return true;
+        }
+
+        if (key.isCursorMove() || normKey.isCursorMove() ||
+            key.check(FcitxKey_Delete) || normKey.check(FcitxKey_Delete) ||
+            key.check(FcitxKey_Escape) || normKey.check(FcitxKey_Escape)) {
+            clearWordState(deltaState);
+        }
+
         return false;
     }
-
-    if (key.check(FcitxKey_Shift_L) || key.check(FcitxKey_Shift_R) ||
-        normKey.check(FcitxKey_Shift_L) || normKey.check(FcitxKey_Shift_R)) {
-        return false;
-    }
-
-    const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
-    if (uni >= 0x20 && uni <= 0x7E) {
-        deltaState.queuedKeys.push_back(key);
-        event.filterAndAccept();
-        pumpQueue(ic, state, adapterShared, debug);
-        return true;
-    }
-
-    if (key.isCursorMove() || normKey.isCursorMove() ||
-        key.check(FcitxKey_Delete) || normKey.check(FcitxKey_Delete) ||
-        key.check(FcitxKey_Escape) || normKey.check(FcitxKey_Escape)) {
-        clearWordState(deltaState);
-    }
-
-    return false;
-}
 
 private:
     OpenKeyState *stateFor(fcitx::InputContext *ic) const {
@@ -1559,63 +1565,69 @@ public:
 
     bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
                OpenKeyState &state) override {
-    auto key = event.rawKey();
-    auto normKey = event.key().normalize();
+        auto key = event.rawKey();
+        auto normKey = event.key().normalize();
 
-    auto isBackspace = [&]() {
-        return key.check(FcitxKey_BackSpace) || normKey.check(FcitxKey_BackSpace);
-    };
+        auto isBackspace = [&]() {
+            return key.check(FcitxKey_BackSpace) || normKey.check(FcitxKey_BackSpace);
+        };
 
-    if (event.isRelease()) {
-        return false;
-    }
-
-    if (hasCtrlAltSuperMeta(key)) {
-        return false;
-    }
-
-    const auto adapterShared = deps_.adapter;
-    const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-    auto &nonPreeditState = state.nonPreeditDelta;
-
-    state.delta.clear();
-
-    if (nonPreeditState.rewriteLock) {
-        if (isBackspace()) {
+        if (event.isRelease()) {
             return false;
         }
 
-        nonPreeditState.nonPreeditKeys.push_back(key);
-        event.filterAndAccept();
-        return true;
-    }
+        if (hasCtrlAltSuperMeta(key)) {
+            return false;
+        }
 
-    if (isBackspace()) {
-        clearComposeState(nonPreeditState, "backspace");
+        const auto adapterShared = deps_.adapter;
+        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
+        auto &nonPreeditState = state.nonPreeditDelta;
+
+        state.delta.clear();
+
+        if (nonPreeditState.rewriteLock) {
+            if (isBackspace()) {
+                return false;
+            }
+
+            nonPreeditState.nonPreeditKeys.push_back(key);
+            event.filterAndAccept();
+            return true;
+        }
+
+        if (isBackspace()) {
+            clearComposeState(nonPreeditState, "backspace");
+            return false;
+        }
+
+        if (key.check(FcitxKey_Shift_L) || key.check(FcitxKey_Shift_R) ||
+            normKey.check(FcitxKey_Shift_L) || normKey.check(FcitxKey_Shift_R)) {
+            return false;
+        }
+
+        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
+
+        if (!(uni >= 0x20 && uni <= 0x7E)) {
+            clearComposeState(nonPreeditState, "non-printable-boundary");
+            return false;
+        }
+
+        if (uni >= 0x20 && uni <= 0x7E) {
+            nonPreeditState.nonPreeditKeys.push_back(key);
+            event.filterAndAccept();
+            pumpNonPreedit(ic, state, adapterShared, debug);
+            return true;
+        }
+
+        if (key.isCursorMove() || normKey.isCursorMove() ||
+            key.check(FcitxKey_Delete) || normKey.check(FcitxKey_Delete) ||
+            key.check(FcitxKey_Escape) || normKey.check(FcitxKey_Escape)) {
+            clearComposeState(nonPreeditState, "cursor-delete");
+        }
+
         return false;
     }
-
-    if (key.check(FcitxKey_Shift_L) || key.check(FcitxKey_Shift_R) ||
-        normKey.check(FcitxKey_Shift_L) || normKey.check(FcitxKey_Shift_R)) {
-        return false;
-    }
-
-    const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
-    if (uni >= 0x20 && uni <= 0x7E) {
-        nonPreeditState.nonPreeditKeys.push_back(key);
-        event.filterAndAccept();
-        pumpNonPreedit(ic, state, adapterShared, debug);
-        return true;
-    }
-
-    if (key.isCursorMove() || normKey.isCursorMove() ||
-        key.check(FcitxKey_Delete) || normKey.check(FcitxKey_Delete) ||
-        key.check(FcitxKey_Escape) || normKey.check(FcitxKey_Escape)) {
-        clearComposeState(nonPreeditState, "cursor-delete");
-    }
-
-    return false;
-}
 
     void handleRemoteBackspaceAction(fcitx::InputContext *ic,
                                      OpenKeyState &state) {
