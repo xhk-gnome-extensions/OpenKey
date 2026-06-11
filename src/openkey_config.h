@@ -32,28 +32,28 @@ FCITX_CONFIGURATION(
     fcitx::OptionWithAnnotation<InputType, InputTypeI18NAnnotation>
         inputType{this, "InputType", N_("Kiểu gõ"), InputType::Telex};
     fcitx::OptionWithAnnotation<CodeTable, CodeTableI18NAnnotation>
-        codeTable{this, "CodeTable", N_("Bảng mã đầu ra"), CodeTable::Unicode};
+        codeTable{this, "CodeTable", N_("Bảng mã"), CodeTable::Unicode};
     fcitx::Option<bool> checkSpelling{
         this, "CheckSpelling", N_("Kiểm tra chính tả"), true};
-    fcitx::Option<bool> enableMacro{this, "EnableMacro", N_("Gõ tắt"), false};
+    fcitx::Option<bool> enableMacro{this, "EnableMacro", N_("Cho phép gõ tắt"), false};
     fcitx::Option<bool> freeMark{
-        this, "FreeMark", N_("Xử lý W ở đầu từ"), true};
+        this, "FreeMark", N_("Cho phép đặt dấu tự do"), true};
     fcitx::Option<bool> restoreIfWrongSpelling{
         this,
         "RestoreIfWrongSpelling",
-        N_("Tự trả phím khi từ không hợp lệ"),
+        N_("Tự trả phím khi gõ sai chính tả"),
         false};
     fcitx::Option<bool> useModernOrthography{
-        this, "UseModernOrthography", N_("Dùng oà, uý thay vì òa, úy"), true};
+        this, "UseModernOrthography", N_("Đặt dấu oà, uý (thay vì òa, úy)"), true};
     fcitx::Option<bool> allowConsonantZFWJ{
-        this, "AllowConsonantZFWJ", N_("Cho phép gõ tự do hơn"), true};
+        this, "AllowConsonantZFWJ", N_("Cho phép gõ phụ âm Z, F, W, J"), true};
     fcitx::Option<std::string> macroFile{
-        this, "MacroFile", N_("Đường dẫn file gõ tắt"), ""};
-    fcitx::Option<bool> debug{this, "Debug", N_("Ghi log debug"), false};
+        this, "MacroFile", N_("Đường dẫn tệp gõ tắt"), ""};
+    fcitx::Option<bool> debug{this, "Debug", N_("Ghi nhật ký gỡ lỗi (debug)"), false};
     fcitx::KeyListOption switchModeKey{
         this,
         "SwitchModeKey",
-        N_("Phím chuyển chế độ gõ"),
+        N_("Phím tắt chuyển chế độ gõ"),
         {fcitx::Key("Alt+space")},
         fcitx::KeyListConstrain(
             fcitx::KeyConstrainFlag::AllowModifierLess)};);
