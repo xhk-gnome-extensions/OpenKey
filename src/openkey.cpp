@@ -26,12 +26,10 @@
 
 #include <fcitx/addonfactory.h>
 #include <fcitx/addonmanager.h>
-#include <fcitx/action.h>
 #include <fcitx-config/iniparser.h>
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputpanel.h>
 #include <fcitx/instance.h>
-#include <fcitx/statusarea.h>
 #include <fcitx/text.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/keysym.h>
@@ -534,54 +532,45 @@ static std::string normalizedProgramName(const std::string &program) {
 
 static std::string runtimeModeToString(RuntimeMode mode) {
     switch (mode) {
-    case RuntimeMode::Auto:
-        return "auto";
-    case RuntimeMode::Preedit:
-        return "preedit";
-    case RuntimeMode::SurroundingText:
-        return "surrounding";
-    case RuntimeMode::BackspaceRewriteDelta:
-        return "backspace";
-    case RuntimeMode::NonPreeditBackspaceRewrite:
-        return "nonPreedit";
-    case RuntimeMode::BrowserWayland:
-        return "browserWayland";
-    case RuntimeMode::DirectCommit:
-        return "direct";
+    case RuntimeMode::Auto:           return "auto";
+    case RuntimeMode::Preedit:        return "preedit";
+    case RuntimeMode::SurroundingText:return "surrounding";
+    case RuntimeMode::BackspaceRewriteDelta: return "backspace";
+    case RuntimeMode::NonPreeditBackspaceRewrite: return "nonPreedit";
+    case RuntimeMode::DirectCommit:   return "direct";
     }
     return "auto";
 }
 
 static bool runtimeModeFromString(const std::string &mode, RuntimeMode &out) {
-    if (equalsASCIIInsensitive(mode, "auto")) {
-        out = RuntimeMode::Auto;
-        return true;
-    }
-    if (equalsASCIIInsensitive(mode, "preedit")) {
-        out = RuntimeMode::Preedit;
-        return true;
-    }
-    if (equalsASCIIInsensitive(mode, "surrounding")) {
-        out = RuntimeMode::SurroundingText;
-        return true;
-    }
-    if (equalsASCIIInsensitive(mode, "backspace")) {
-        out = RuntimeMode::BackspaceRewriteDelta;
-        return true;
-    }
-    if (equalsASCIIInsensitive(mode, "nonPreedit")) {
-        out = RuntimeMode::NonPreeditBackspaceRewrite;
-        return true;
-    }
-    if (equalsASCIIInsensitive(mode, "browserWayland")) {
-        out = RuntimeMode::BrowserWayland;
-        return true;
-    }
-    if (equalsASCIIInsensitive(mode, "direct")) {
-        out = RuntimeMode::DirectCommit;
-        return true;
-    }
+    if (equalsASCIIInsensitive(mode, "auto"))        { out = RuntimeMode::Auto; return true; }
+    if (equalsASCIIInsensitive(mode, "preedit"))     { out = RuntimeMode::Preedit; return true; }
+    if (equalsASCIIInsensitive(mode, "surrounding")) { out = RuntimeMode::SurroundingText; return true; }
+    if (equalsASCIIInsensitive(mode, "backspace"))   { out = RuntimeMode::BackspaceRewriteDelta; return true; }
+    if (equalsASCIIInsensitive(mode, "nonPreedit"))  { out = RuntimeMode::NonPreeditBackspaceRewrite; return true; }
+    if (equalsASCIIInsensitive(mode, "direct"))      { out = RuntimeMode::DirectCommit; return true; }
     return false;
+}
+
+static int toOpenKeyInputType(InputType type) {
+    switch (type) {
+    case InputType::Telex:       return 0;
+    case InputType::VNI:         return 1;
+    case InputType::SimpleTelex1:return 2;
+    case InputType::SimpleTelex2:return 3;
+    }
+    return 0;
+}
+
+static int toOpenKeyCodeTable(CodeTable table) {
+    switch (table) {
+    case CodeTable::Unicode:    return 0;
+    case CodeTable::TCVN3:      return 1;
+    case CodeTable::VNIWindows: return 2;
+    case CodeTable::UnicodeCompound: return 3;
+    case CodeTable::VietnameseLocaleCP1258: return 4;
+    }
+    return 0;
 }
 
 struct RewriteTiming {
@@ -761,12 +750,6 @@ static bool isElectronLikeProgram(const std::string &program) {
         }
     }
     return false;
-}
-
-static bool shouldSkipDSTOnWayland(fcitx::InputContext *ic,
-                                   const std::string &program) {
-    return !isRunningOnX11(ic) &&
-           (isBrowserLikeProgram(program) || isElectronLikeProgram(program));
 }
 
 static DeltaRewriteTiming deltaTimingFor(fcitx::InputContext *ic,
@@ -969,32 +952,6 @@ static unsigned int utf8CharCount(const std::string &s) {
     return static_cast<unsigned int>(fcitx::utf8::length(s));
 }
 
-static int toOpenKeyInputType(InputType type) {
-    switch (type) {
-    case InputType::Telex:
-        return 0;
-    case InputType::VNI:
-        return 1;
-    case InputType::SimpleTelex1:
-        return 2;
-    case InputType::SimpleTelex2:
-        return 3;
-    }
-    return 0;
-}
-
-static int toOpenKeyCodeTable(CodeTable table) {
-    switch (table) {
-    case CodeTable::Unicode:
-        return 0;
-    case CodeTable::TCVN3:
-        return 1;
-    case CodeTable::VNIWindows:
-        return 2;
-    }
-    return 0;
-}
-
 static bool isMacroTriggerKey(char c) {
     if (c == ' ') {
         return true;
@@ -1081,6 +1038,8 @@ struct DeltaModeDeps {
     BackspaceInjector *backspaceInjector = nullptr;
     std::weak_ptr<void> lifetimeWeak;
     std::function<bool()> debugEnabled;
+    std::function<bool()> enableMacro;
+    std::function<bool()> restoreIfWrongSpelling;
     std::function<bool()> nonPreeditRemoteEnabled;
     std::function<bool(fcitx::InputContext *, OpenKeyState &, unsigned int,
                        uint64_t, uint64_t)>
@@ -1092,6 +1051,7 @@ struct SimpleModeHandlerDeps {
     std::shared_ptr<OpenKeyAdapter> adapter;
     std::function<bool()> debugEnabled;
     std::function<bool()> enableMacro;
+    std::function<bool()> restoreIfWrongSpelling;
 };
 
 // ---------------------------------------------------------------------------
@@ -1116,6 +1076,7 @@ public:
             ic->commitString(out);
             state.lastCommitted = state.composing;
             state.composing.clear();
+            state.preeditKeyBuffer.clear();
             updatePreeditUI(ic, state);
             event.filterAndAccept();
             return true;
@@ -1137,6 +1098,9 @@ public:
                 } else {
                     state.composing.clear();
                 }
+                if (!state.preeditKeyBuffer.empty()) {
+                    state.preeditKeyBuffer.pop_back();
+                }
                 updatePreeditUI(ic, state);
                 event.filterAndAccept();
                 return true;
@@ -1147,6 +1111,7 @@ public:
         if (key.check(FcitxKey_Escape)) {
             if (!state.composing.empty()) {
                 state.composing.clear();
+                state.preeditKeyBuffer.clear();
                 updatePreeditUI(ic, state);
                 event.filterAndAccept();
                 return true;
@@ -1168,26 +1133,52 @@ public:
             return false;
         }
 
+        auto expandMacroBeforeBoundary = [&](char trigger) {
+            if (!deps_.enableMacro || !deps_.enableMacro() ||
+                !isMacroTriggerKey(trigger) || state.composing.empty()) {
+                return false;
+            }
+            std::string replacement;
+            if (!deps_.adapter->expandMacro(state.composing, replacement)) {
+                return false;
+            }
+            state.composing = std::move(replacement);
+            return true;
+        };
+
+        auto restoreBeforeBoundary = [&](char trigger) {
+            if (!deps_.restoreIfWrongSpelling ||
+                !deps_.restoreIfWrongSpelling() || state.composing.empty()) {
+                return false;
+            }
+            std::string restoredWord;
+            const bool restored =
+                !state.preeditKeyBuffer.empty()
+                    ? deps_.adapter->restoreFromRawAsciiOnWordBreak(
+                          state.composing, state.preeditKeyBuffer, trigger,
+                          restoredWord)
+                    : deps_.adapter->restoreOnWordBreak(state.composing, trigger,
+                                                       restoredWord);
+            if (!restored) {
+                return false;
+            }
+            state.composing = std::move(restoredWord);
+            return true;
+        };
+
         if (uni >= 0x20 && uni <= 0x7E) {
             const char c = static_cast<char>(uni);
 
             if (c == ' ') {
-                if (deps_.enableMacro && deps_.enableMacro() && !state.composing.empty()) {
-                    std::string replacement;
-                    if (deps_.adapter->expandMacro(state.composing, replacement)) {
-                        state.composing = std::move(replacement);
-                    }
+                if (!expandMacroBeforeBoundary(c)) {
+                    restoreBeforeBoundary(c);
                 }
                 return commitPreeditAndMaybeAppend(" ");
             }
             if (!isComposingASCII(c)) {
                 const std::string boundaryUtf8 = fcitx::Key::keySymToUTF8(key.sym());
-                if (deps_.enableMacro && deps_.enableMacro() && isMacroTriggerKey(c) &&
-                    !state.composing.empty()) {
-                    std::string replacement;
-                    if (deps_.adapter->expandMacro(state.composing, replacement)) {
-                        state.composing = std::move(replacement);
-                    }
+                if (!expandMacroBeforeBoundary(c)) {
+                    restoreBeforeBoundary(c);
                 }
                 if (!boundaryUtf8.empty()) {
                     return commitPreeditAndMaybeAppend(boundaryUtf8);
@@ -1201,6 +1192,7 @@ public:
                 return false;
             }
             state.composing = std::move(r.newWord);
+            state.preeditKeyBuffer.push_back(c);
             updatePreeditUI(ic, state);
             event.filterAndAccept();
             return true;
@@ -1211,6 +1203,7 @@ public:
 
     void reset(OpenKeyState &state) override {
         state.composing.clear();
+        state.preeditKeyBuffer.clear();
     }
 
 private:
@@ -1245,6 +1238,7 @@ private:
         ic->commitString(state.composing);
         state.lastCommitted = state.composing;
         state.composing.clear();
+        state.preeditKeyBuffer.clear();
         updatePreeditUI(ic, state);
     }
 
@@ -1276,18 +1270,11 @@ public:
                          << " rollbackWord=" << state.rollbackWord;
         }
 
-        if (shouldSkipDSTOnWayland(ic, state.program)) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.noSeedNextWord = false;
-            return false;
-        }
-
         if (key.check(FcitxKey_Delete) || key.isCursorMove()) {
             state.macroBuffer.clear();
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             state.noSeedNextWord = false;
             return false;
         }
@@ -1298,6 +1285,7 @@ public:
                     !fcitx::utf8::validate(state.rollbackDisplay)) {
                     state.rollbackWord.clear();
                     state.rollbackDisplay.clear();
+                    state.rollbackRawBuffer.clear();
                     return false;
                 }
                 const auto len = fcitx::utf8::length(state.rollbackWord);
@@ -1316,6 +1304,7 @@ public:
                 if (deleteChars > 128) {
                     state.rollbackWord.clear();
                     state.rollbackDisplay.clear();
+                    state.rollbackRawBuffer.clear();
                     return false;
                 }
                 if (deleteChars > 0) {
@@ -1325,6 +1314,12 @@ public:
                     ic->commitString(newDisplay.substr(prefixLen));
                 }
                 state.rollbackDisplay = std::move(newDisplay);
+                if (!state.rollbackRawBuffer.empty()) {
+                    state.rollbackRawBuffer.pop_back();
+                }
+                if (state.rollbackDisplay.empty()) {
+                    state.rollbackRawBuffer.clear();
+                }
                 if (debug) {
                     FCITX_INFO() << "openkey: st bs program=" << state.program
                                  << " deleteChars=" << deleteChars
@@ -1344,6 +1339,7 @@ public:
             state.macroBuffer.clear();
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             state.noSeedNextWord = false;
             return false;
         }
@@ -1353,6 +1349,7 @@ public:
             state.macroBuffer.clear();
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             state.noSeedNextWord = false;
             return false;
         }
@@ -1365,6 +1362,7 @@ public:
                 st.cursor() > fcitx::utf8::length(st.text())) {
                 state.rollbackWord.clear();
                 state.rollbackDisplay.clear();
+                state.rollbackRawBuffer.clear();
                 return false;
             }
             WordSegment seg;
@@ -1377,43 +1375,77 @@ public:
                 }
                 state.rollbackWord.clear();
                 state.rollbackDisplay.clear();
+                state.rollbackRawBuffer.clear();
                 return false;
             }
         }
 
+        auto replaceRollbackDisplay = [&](const std::string &replacement) {
+            const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
+            if (deleteChars == 0 || deleteChars > 128) {
+                return false;
+            }
+            ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+            ic->commitString(replacement);
+            state.rollbackWord = replacement;
+            state.rollbackDisplay = replacement;
+            state.rollbackRawBuffer.clear();
+            state.lastCommitted = replacement;
+            return true;
+        };
+
+        auto expandMacroBeforeBoundary = [&](char trigger) {
+            if (!deps_.enableMacro || !deps_.enableMacro() ||
+                !isMacroTriggerKey(trigger) || state.rollbackDisplay.empty()) {
+                return false;
+            }
+            std::string replacement;
+            if (!deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
+                return false;
+            }
+            return replaceRollbackDisplay(replacement);
+        };
+
+        auto restoreBeforeBoundary = [&](char trigger) {
+            if (!deps_.restoreIfWrongSpelling ||
+                !deps_.restoreIfWrongSpelling() ||
+                state.rollbackDisplay.empty()) {
+                return false;
+            }
+            std::string restoredWord;
+            const bool restored =
+                !state.rollbackRawBuffer.empty()
+                    ? deps_.adapter->restoreFromRawAsciiOnWordBreak(
+                          state.rollbackDisplay, state.rollbackRawBuffer, trigger,
+                          restoredWord)
+                    : deps_.adapter->restoreOnWordBreak(state.rollbackDisplay,
+                                                       trigger, restoredWord);
+            if (!restored) {
+                return false;
+            }
+            return replaceRollbackDisplay(restoredWord);
+        };
+
         if (c == ' ' || c == '\t') {
-            if (deps_.enableMacro && deps_.enableMacro() && !state.rollbackDisplay.empty()) {
-                std::string replacement;
-                if (deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
-                    const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
-                    if (deleteChars > 0 && deleteChars <= 128) {
-                        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-                        ic->commitString(replacement);
-                    }
-                }
+            if (!expandMacroBeforeBoundary(c)) {
+                restoreBeforeBoundary(c);
             }
             state.macroBuffer.clear();
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             state.noSeedNextWord = true;
             return false;
         }
 
         if (!isComposingASCII(c)) {
-            if (deps_.enableMacro && deps_.enableMacro() && isMacroTriggerKey(c) &&
-                !state.rollbackDisplay.empty()) {
-                std::string replacement;
-                if (deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
-                    const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
-                    if (deleteChars > 0 && deleteChars <= 128) {
-                        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-                        ic->commitString(replacement);
-                    }
-                }
+            if (!expandMacroBeforeBoundary(c)) {
+                restoreBeforeBoundary(c);
             }
             state.macroBuffer.clear();
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             state.noSeedNextWord = true;
             return false;
         }
@@ -1427,6 +1459,7 @@ public:
                 if (extractWordBeforeCursor(st.text(), st.cursor(), seg)) {
                     state.rollbackWord = seg.word;
                     state.rollbackDisplay = seg.word;
+                    state.rollbackRawBuffer.clear();
                     if (debug) {
                         FCITX_INFO() << "openkey: st seed program=" << state.program
                                      << " st.cursor=" << st.cursor()
@@ -1441,6 +1474,7 @@ public:
         if (!r.handled) {
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             return false;
         }
         if (!fcitx::utf8::validate(r.newWord)) {
@@ -1450,6 +1484,7 @@ public:
             }
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             return false;
         }
 
@@ -1466,6 +1501,7 @@ public:
             }
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             return false;
         }
         if (deleteChars > 0) {
@@ -1483,6 +1519,7 @@ public:
 
         state.rollbackWord = r.newWord;
         state.rollbackDisplay = r.newWord;
+        state.rollbackRawBuffer.push_back(c);
         state.lastCommitted = state.rollbackDisplay;
         event.filterAndAccept();
         return true;
@@ -1492,221 +1529,13 @@ public:
         state.macroBuffer.clear();
         state.rollbackWord.clear();
         state.rollbackDisplay.clear();
+        state.rollbackRawBuffer.clear();
         state.noSeedNextWord = false;
     }
 
 private:
     SimpleModeHandlerDeps deps_;
 };
-
-// ---------------------------------------------------------------------------
-// BrowserWaylandModeHandler
-// Cơ chế deleteSurroundingText như SurroundingTextModeHandler nhưng:
-// - Không check shouldSkipDSTOnWayland (luôn dùng DST kể cả trên Wayland)
-// - Không có fallback tự động sang preedit
-// Dành cho browser trên Wayland mà user chọn thủ công.
-// ---------------------------------------------------------------------------
-
-class BrowserWaylandModeHandler final : public InputModeHandler {
-public:
-    explicit BrowserWaylandModeHandler(SimpleModeHandlerDeps deps)
-        : deps_(std::move(deps)) {}
-
-    bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
-                   OpenKeyState &state) override {
-        auto key = event.key().normalize();
-
-        state.composing.clear();
-
-        const bool debug = deps_.debugEnabled && deps_.debugEnabled();
-
-        if (debug) {
-            FCITX_INFO() << "openkey: bw key program=" << state.program
-                         << " sym=" << key.sym()
-                         << " rollbackDisplay=" << state.rollbackDisplay
-                         << " rollbackWord=" << state.rollbackWord;
-        }
-
-        if (key.check(FcitxKey_Delete) || key.isCursorMove()) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.noSeedNextWord = false;
-            return false;
-        }
-
-        if (key.check(FcitxKey_BackSpace)) {
-            if (!state.rollbackWord.empty()) {
-                if (!fcitx::utf8::validate(state.rollbackWord) ||
-                    !fcitx::utf8::validate(state.rollbackDisplay)) {
-                    state.rollbackWord.clear();
-                    state.rollbackDisplay.clear();
-                    return false;
-                }
-                const auto len = fcitx::utf8::length(state.rollbackWord);
-                if (len > 0) {
-                    auto it = fcitx::utf8::nextNChar(state.rollbackWord.begin(), len - 1);
-                    state.rollbackWord.erase(it, state.rollbackWord.end());
-                } else {
-                    state.rollbackWord.clear();
-                }
-
-                std::string newDisplay = state.rollbackWord;
-                const std::size_t prefixLen =
-                    commonPrefixBytesUTF8Boundary(state.rollbackDisplay, newDisplay);
-                const unsigned int deleteChars =
-                    utf8CharCount(state.rollbackDisplay.substr(prefixLen));
-                if (deleteChars > 128) {
-                    state.rollbackWord.clear();
-                    state.rollbackDisplay.clear();
-                    return false;
-                }
-                if (deleteChars > 0) {
-                    ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-                }
-                if (newDisplay.size() > prefixLen) {
-                    ic->commitString(newDisplay.substr(prefixLen));
-                }
-                state.rollbackDisplay = std::move(newDisplay);
-                if (debug) {
-                    FCITX_INFO() << "openkey: bw bs program=" << state.program
-                                 << " deleteChars=" << deleteChars
-                                 << " newDisplay=" << state.rollbackDisplay;
-                }
-                event.filterAndAccept();
-                return true;
-            }
-            if (!state.macroBuffer.empty()) {
-                state.macroBuffer.pop_back();
-            }
-            return false;
-        }
-
-        if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
-            key.check(FcitxKey_ISO_Enter)) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.noSeedNextWord = false;
-            return false;
-        }
-
-        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
-        if (!(uni >= 0x20 && uni <= 0x7E)) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.noSeedNextWord = false;
-            return false;
-        }
-        const char c = static_cast<char>(uni);
-
-        if (c == ' ' || c == '\t') {
-            if (deps_.enableMacro && deps_.enableMacro() && !state.rollbackDisplay.empty()) {
-                std::string replacement;
-                if (deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
-                    const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
-                    if (deleteChars > 0 && deleteChars <= 128) {
-                        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-                        ic->commitString(replacement);
-                    }
-                }
-            }
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.noSeedNextWord = true;
-            return false;
-        }
-
-        if (!isComposingASCII(c)) {
-            if (deps_.enableMacro && deps_.enableMacro() && isMacroTriggerKey(c) &&
-                !state.rollbackDisplay.empty()) {
-                std::string replacement;
-                if (deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
-                    const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
-                    if (deleteChars > 0 && deleteChars <= 128) {
-                        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-                        ic->commitString(replacement);
-                    }
-                }
-            }
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.noSeedNextWord = true;
-            return false;
-        }
-
-        if (state.noSeedNextWord) {
-            state.noSeedNextWord = false;
-        } else if (state.rollbackWord.empty()) {
-            auto &st = ic->surroundingText();
-            if (st.isValid() && st.cursor() == st.anchor()) {
-                WordSegment seg;
-                if (extractWordBeforeCursor(st.text(), st.cursor(), seg)) {
-                    state.rollbackWord = seg.word;
-                    state.rollbackDisplay = seg.word;
-                    if (debug) {
-                        FCITX_INFO() << "openkey: bw seed program=" << state.program
-                                     << " seed=" << seg.word;
-                    }
-                }
-            }
-        }
-
-        auto r = deps_.adapter->processAsciiKey(state.rollbackWord, c);
-        if (!r.handled) {
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            return false;
-        }
-        if (!fcitx::utf8::validate(r.newWord)) {
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            return false;
-        }
-
-        const std::size_t prefixLen =
-            commonPrefixBytesUTF8Boundary(state.rollbackDisplay, r.newWord);
-        const unsigned int deleteChars =
-            utf8CharCount(state.rollbackDisplay.substr(prefixLen));
-        if (deleteChars > 128) {
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            return false;
-        }
-        if (deleteChars > 0) {
-            ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-        }
-        if (r.newWord.size() > prefixLen) {
-            ic->commitString(r.newWord.substr(prefixLen));
-        }
-        if (debug) {
-            FCITX_INFO() << "openkey: bw apply program=" << state.program
-                         << " deleteChars=" << deleteChars
-                         << " commitDelta=" << r.newWord.substr(prefixLen)
-                         << " newWord=" << r.newWord;
-        }
-
-        state.rollbackWord = r.newWord;
-        state.rollbackDisplay = r.newWord;
-        state.lastCommitted = state.rollbackDisplay;
-        event.filterAndAccept();
-        return true;
-    }
-
-    void reset(OpenKeyState &state) override {
-        state.macroBuffer.clear();
-        state.rollbackWord.clear();
-        state.rollbackDisplay.clear();
-        state.noSeedNextWord = false;
-    }
-
-private:
-    SimpleModeHandlerDeps deps_;
-};
-
 
 class BackspaceRewriteModeHandler final : public InputModeHandler {
 public:
@@ -1811,6 +1640,7 @@ private:
         }
 
         deltaState.shownText.clear();
+        deltaState.rawAsciiBuffer.clear();
         deltaState.hasRewrittenCurrentWord = false;
         deltaState.rewriteLock = false;
         deltaState.waitingBackspaceAck = false;
@@ -1900,6 +1730,7 @@ private:
         deltaState.seenBackspaces = 0;
         deltaState.ackTimeoutTimer.reset();
         if (deltaState.shownText.empty()) {
+            deltaState.rawAsciiBuffer.clear();
             deltaState.hasRewrittenCurrentWord = false;
         }
 
@@ -2023,7 +1854,8 @@ private:
 
     bool applyWordDelta(fcitx::InputContext *ic, OpenKeyState &state,
                         bool debug, const std::string &newWord, char asciiChar,
-                        const char *reason) {
+                        const char *reason,
+                        bool compareWithRawAppend = true) {
         auto &deltaState = state.delta;
         if (!deps_.backspaceInjector) {
             return false;
@@ -2035,7 +1867,8 @@ private:
         }
 
         const std::string oldShown = deltaState.shownText;
-        const std::string rawAppend = oldShown + asciiChar;
+        const std::string rawAppend =
+            compareWithRawAppend ? oldShown + asciiChar : oldShown;
         const DeltaRewriteTiming timing = deltaTimingFor(ic, state.program);
         const std::size_t prefixLen =
             commonPrefixBytesUTF8Boundary(deltaState.shownText, newWord);
@@ -2104,6 +1937,76 @@ private:
         return false;
     }
 
+    bool maybeExpandMacroBeforeBoundary(fcitx::InputContext *ic,
+                                        OpenKeyState &state,
+                                        const fcitx::Key &boundaryKey,
+                                        std::shared_ptr<OpenKeyAdapter> adapterShared,
+                                        bool debug, char trigger) {
+        auto &deltaState = state.delta;
+        if (!deps_.enableMacro || !deps_.enableMacro() || !adapterShared ||
+            !isMacroTriggerKey(trigger) || deltaState.shownText.empty()) {
+            return false;
+        }
+
+        adapterShared->setCodeTable(state.codeTable);
+        std::string replacement;
+        if (!adapterShared->expandMacro(deltaState.shownText, replacement)) {
+            return false;
+        }
+
+        if (!applyWordDelta(ic, state, debug, replacement, trigger, "macro",
+                            false)) {
+            return false;
+        }
+
+        if (deltaState.hasPendingRewrite()) {
+            deltaState.queuedKeys.push_front(boundaryKey);
+        } else {
+            ic->forwardKey(boundaryKey);
+            clearWordState(deltaState);
+        }
+        return true;
+    }
+
+    bool maybeRestoreBeforeBoundary(fcitx::InputContext *ic,
+                                    OpenKeyState &state,
+                                    const fcitx::Key &boundaryKey,
+                                    std::shared_ptr<OpenKeyAdapter> adapterShared,
+                                    bool debug, char trigger) {
+        auto &deltaState = state.delta;
+        if (!deps_.restoreIfWrongSpelling ||
+            !deps_.restoreIfWrongSpelling() || !adapterShared ||
+            deltaState.shownText.empty()) {
+            return false;
+        }
+
+        adapterShared->setCodeTable(state.codeTable);
+        std::string restoredWord;
+        const bool restored =
+            !deltaState.rawAsciiBuffer.empty()
+                ? adapterShared->restoreFromRawAsciiOnWordBreak(
+                      deltaState.shownText, deltaState.rawAsciiBuffer, trigger,
+                      restoredWord)
+                : adapterShared->restoreOnWordBreak(deltaState.shownText, trigger,
+                                                   restoredWord);
+        if (!restored) {
+            return false;
+        }
+
+        if (!applyWordDelta(ic, state, debug, restoredWord, trigger,
+                            "restore-boundary", false)) {
+            return false;
+        }
+
+        if (deltaState.hasPendingRewrite()) {
+            deltaState.queuedKeys.push_front(boundaryKey);
+        } else {
+            ic->forwardKey(boundaryKey);
+            clearWordState(deltaState);
+        }
+        return true;
+    }
+
     bool processQueuedKey(fcitx::InputContext *ic, OpenKeyState &state,
                           const fcitx::Key &key,
                           std::shared_ptr<OpenKeyAdapter> adapterShared,
@@ -2133,6 +2036,14 @@ private:
             if (isBoundaryASCII(c) || key.check(FcitxKey_Return) ||
                 key.check(FcitxKey_KP_Enter) || key.check(FcitxKey_ISO_Enter) ||
                 key.check(FcitxKey_Tab)) {
+                if (maybeExpandMacroBeforeBoundary(ic, state, key, adapterShared,
+                                                   debug, c)) {
+                    return true;
+                }
+                if (maybeRestoreBeforeBoundary(ic, state, key, adapterShared,
+                                               debug, c)) {
+                    return true;
+                }
                 clearWordState(deltaState);
                 return false;
             }
@@ -2155,6 +2066,7 @@ private:
                 clearWordState(deltaState);
                 return false;
             }
+            deltaState.rawAsciiBuffer.push_back(c);
             return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
         }
 
@@ -2295,6 +2207,7 @@ private:
                         << " remotePending=" << nonPreeditState.remoteRewritePending;
         }
         nonPreeditState.shownText.clear();
+        nonPreeditState.rawAsciiBuffer.clear();
         nonPreeditState.hasRewrittenCurrentWord = false;
         nonPreeditState.rewriteLock = false;
         nonPreeditState.waitingBackspaceAck = false;
@@ -2333,6 +2246,7 @@ private:
         nonPreeditState.remotePendingTxId = 0;
         nonPreeditState.remoteRewritePending = false;
         if (nonPreeditState.shownText.empty()) {
+            nonPreeditState.rawAsciiBuffer.clear();
             nonPreeditState.hasRewrittenCurrentWord = false;
         }
 
@@ -2395,7 +2309,8 @@ private:
 
     bool applyWordDelta(fcitx::InputContext *ic, OpenKeyState &state,
                         bool debug, const std::string &newWord, char asciiChar,
-                        const char *reason) {
+                        const char *reason,
+                        bool compareWithRawAppend = true) {
         auto &nonPreeditState = state.nonPreeditDelta;
         if (!deps_.backspaceInjector) {
             return false;
@@ -2407,7 +2322,8 @@ private:
         }
 
         const std::string oldShown = nonPreeditState.shownText;
-        const std::string rawAppend = oldShown + asciiChar;
+        const std::string rawAppend =
+            compareWithRawAppend ? oldShown + asciiChar : oldShown;
         const RewriteTiming timing = nonPreeditTimingFor(ic, state.program);
         const std::size_t prefixLen =
             commonPrefixBytesUTF8Boundary(nonPreeditState.shownText, newWord);
@@ -2475,6 +2391,83 @@ private:
         return false;
     }
 
+    bool hasPendingRewrite(const NonPreeditDeltaRewriteState &state) const {
+        return state.rewriteLock || state.waitingBackspaceAck ||
+               !state.pendingConvertedText.empty() ||
+               !state.pendingShownTextAfterCommit.empty() ||
+               state.hasRemoteRewritePending();
+    }
+
+    bool maybeExpandMacroBeforeBoundary(fcitx::InputContext *ic,
+                                        OpenKeyState &state,
+                                        const fcitx::Key &boundaryKey,
+                                        std::shared_ptr<OpenKeyAdapter> adapterShared,
+                                        bool debug, char trigger) {
+        auto &nonPreeditState = state.nonPreeditDelta;
+        if (!deps_.enableMacro || !deps_.enableMacro() || !adapterShared ||
+            !isMacroTriggerKey(trigger) || nonPreeditState.shownText.empty()) {
+            return false;
+        }
+
+        adapterShared->setCodeTable(state.codeTable);
+        std::string replacement;
+        if (!adapterShared->expandMacro(nonPreeditState.shownText, replacement)) {
+            return false;
+        }
+
+        if (!applyWordDelta(ic, state, debug, replacement, trigger, "macro",
+                            false)) {
+            return false;
+        }
+
+        if (hasPendingRewrite(nonPreeditState)) {
+            nonPreeditState.nonPreeditKeys.push_front(boundaryKey);
+        } else {
+            ic->forwardKey(boundaryKey);
+            clearComposeState(nonPreeditState, "macro-boundary");
+        }
+        return true;
+    }
+
+    bool maybeRestoreBeforeBoundary(fcitx::InputContext *ic,
+                                    OpenKeyState &state,
+                                    const fcitx::Key &boundaryKey,
+                                    std::shared_ptr<OpenKeyAdapter> adapterShared,
+                                    bool debug, char trigger) {
+        auto &nonPreeditState = state.nonPreeditDelta;
+        if (!deps_.restoreIfWrongSpelling ||
+            !deps_.restoreIfWrongSpelling() || !adapterShared ||
+            nonPreeditState.shownText.empty()) {
+            return false;
+        }
+
+        adapterShared->setCodeTable(state.codeTable);
+        std::string restoredWord;
+        const bool restored =
+            !nonPreeditState.rawAsciiBuffer.empty()
+                ? adapterShared->restoreFromRawAsciiOnWordBreak(
+                      nonPreeditState.shownText,
+                      nonPreeditState.rawAsciiBuffer, trigger, restoredWord)
+                : adapterShared->restoreOnWordBreak(nonPreeditState.shownText,
+                                                   trigger, restoredWord);
+        if (!restored) {
+            return false;
+        }
+
+        if (!applyWordDelta(ic, state, debug, restoredWord, trigger,
+                            "restore-boundary", false)) {
+            return false;
+        }
+
+        if (hasPendingRewrite(nonPreeditState)) {
+            nonPreeditState.nonPreeditKeys.push_front(boundaryKey);
+        } else {
+            ic->forwardKey(boundaryKey);
+            clearComposeState(nonPreeditState, "restore-boundary");
+        }
+        return true;
+    }
+
     bool processNonPreeditKey(fcitx::InputContext *ic, OpenKeyState &state,
                           const fcitx::Key &nonPreeditKey,
                           std::shared_ptr<OpenKeyAdapter> adapterShared,
@@ -2509,8 +2502,12 @@ private:
             if (method != BackspaceInjector::Method::Uinput) {
                 return false;
             }
+            if (!nonPreeditState.rawAsciiBuffer.empty()) {
+                nonPreeditState.rawAsciiBuffer.pop_back();
+            }
             nonPreeditState.shownText = utf8DropLastN(nonPreeditState.shownText, 1);
             if (nonPreeditState.shownText.empty()) {
+                nonPreeditState.rawAsciiBuffer.clear();
                 nonPreeditState.hasRewrittenCurrentWord = false;
             }
             return true;
@@ -2525,6 +2522,14 @@ private:
                 nonPreeditKey.check(FcitxKey_KP_Enter) ||
                 nonPreeditKey.check(FcitxKey_ISO_Enter) ||
                 nonPreeditKey.check(FcitxKey_Tab)) {
+                if (maybeExpandMacroBeforeBoundary(ic, state, nonPreeditKey,
+                                                   adapterShared, debug, c)) {
+                    return true;
+                }
+                if (maybeRestoreBeforeBoundary(ic, state, nonPreeditKey,
+                                               adapterShared, debug, c)) {
+                    return true;
+                }
                clearComposeState(nonPreeditState, "boundary");
                 return false;
             }
@@ -2547,6 +2552,7 @@ private:
                 clearComposeState(nonPreeditState, "adapter-not-handled");
                 return false;
             }
+            nonPreeditState.rawAsciiBuffer.push_back(c);
             return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
         }
 
@@ -2598,6 +2604,10 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     deltaDeps.backspaceInjector = &g_backspaceInjector;
     deltaDeps.lifetimeWeak = lifetime_;
     deltaDeps.debugEnabled = [this]() { return debugEnabled(); };
+    deltaDeps.enableMacro = [this]() { return config_.enableMacro.value(); };
+    deltaDeps.restoreIfWrongSpelling = [this]() {
+        return config_.restoreIfWrongSpelling.value();
+    };
     backspaceRewriteHandler_ =
         std::make_unique<BackspaceRewriteModeHandler>(std::move(deltaDeps));
     DeltaModeDeps nonPreeditDeltaDeps;
@@ -2607,6 +2617,12 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     nonPreeditDeltaDeps.backspaceInjector = &g_backspaceInjector;
     nonPreeditDeltaDeps.lifetimeWeak = lifetime_;
     nonPreeditDeltaDeps.debugEnabled = [this]() { return debugEnabled(); };
+    nonPreeditDeltaDeps.enableMacro = [this]() {
+        return config_.enableMacro.value();
+    };
+    nonPreeditDeltaDeps.restoreIfWrongSpelling = [this]() {
+        return config_.restoreIfWrongSpelling.value();
+    };
     nonPreeditDeltaDeps.nonPreeditRemoteEnabled = [this]() {
         return remoteNonPreeditCoordinator_ && remoteNonPreeditCoordinator_->enabled();
     };
@@ -2626,9 +2642,11 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     simpleDeps.adapter = adapter_;
     simpleDeps.debugEnabled = [this]() { return debugEnabled(); };
     simpleDeps.enableMacro = [this]() { return config_.enableMacro.value(); };
+    simpleDeps.restoreIfWrongSpelling = [this]() {
+        return config_.restoreIfWrongSpelling.value();
+    };
     preeditHandler_ = std::make_unique<PreeditModeHandler>(simpleDeps);
-    surroundingTextHandler_ = std::make_unique<SurroundingTextModeHandler>(simpleDeps);
-    browserWaylandHandler_ = std::make_unique<BrowserWaylandModeHandler>(std::move(simpleDeps));
+    surroundingTextHandler_ = std::make_unique<SurroundingTextModeHandler>(std::move(simpleDeps));
     reloadConfig();
     if (remoteNonPreeditCoordinator_) {
         remoteNonPreeditCoordinator_->ensureAvailableOrStartOnce();
@@ -2669,13 +2687,11 @@ std::string OpenKeyEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
             return "Auto";
         case RuntimeMode::SurroundingText:
             return "Non Preedit (Gtk Only)";
-        case RuntimeMode::BrowserWayland:
-            return "Non Preedit (Browser on Wayland)";
         case RuntimeMode::Preedit:
             return "Preedit";
-        case RuntimeMode::BackspaceRewriteDelta:
-            return "Non Preedit";
         case RuntimeMode::NonPreeditBackspaceRewrite:
+            return "Non Preedit";
+        case RuntimeMode::BackspaceRewriteDelta:
             return "Non Preedit (Non Server)";
         case RuntimeMode::DirectCommit:
             return "Direct";
@@ -2702,13 +2718,11 @@ std::string OpenKeyEngine::subMode(const fcitx::InputMethodEntry &,
         return "Auto";
     case RuntimeMode::SurroundingText:
         return "Non Preedit (Gtk Only)";
-    case RuntimeMode::BrowserWayland:
-        return "Non Preedit (Browser on Wayland)";
     case RuntimeMode::Preedit:
         return "Preedit";
-    case RuntimeMode::BackspaceRewriteDelta:
-        return "Non Preedit";
     case RuntimeMode::NonPreeditBackspaceRewrite:
+        return "Non Preedit";
+    case RuntimeMode::BackspaceRewriteDelta:
         return "Non Preedit (Non Server)";
     case RuntimeMode::DirectCommit:
         return "Direct";
@@ -2727,7 +2741,6 @@ bool OpenKeyEngine::debugEnabled() const {
 bool OpenKeyEngine::nonPreeditServerAvailable() {
     return remoteNonPreeditCoordinator_ && remoteNonPreeditCoordinator_->available();
 }
-
 
 void OpenKeyEngine::loadAppModes() {
     auto loadOne = [](const char *path,
@@ -2858,6 +2871,8 @@ void OpenKeyEngine::setConfig(const fcitx::RawConfig &config) {
 void OpenKeyEngine::reloadConfig() {
     fcitx::readAsIni(config_, fcitx::StandardPath::Type::PkgConfig,
                      "conf/openkey.conf");
+    fcitx::readAsIni(macroTables_, fcitx::StandardPath::Type::PkgConfig,
+                     "conf/openkey-macro-table.conf");
     loadAppModes();
     applyConfig();
 }
@@ -2868,34 +2883,67 @@ void OpenKeyEngine::applyConfig() {
     adapter_->setCodeTable(toOpenKeyCodeTable(config_.codeTable.value()));
     adapter_->setCheckSpelling(config_.checkSpelling.value());
     adapter_->setUseModernOrthography(config_.useModernOrthography.value());
-    adapter_->setQuickTelex(config_.quickTelex.value());
+    adapter_->setLiteralWAtWordStart(config_.literalWAtWordStart.value());
+    adapter_->setQuickTelex(false);
     adapter_->setRestoreIfWrongSpelling(config_.restoreIfWrongSpelling.value());
-    adapter_->setUpperCaseFirstChar(config_.upperCaseFirstChar.value());
+    adapter_->setUpperCaseFirstChar(false);
     adapter_->setAllowConsonantZFWJ(config_.allowConsonantZFWJ.value());
-    adapter_->setQuickStartConsonant(config_.quickStartConsonant.value());
-    adapter_->setQuickEndConsonant(config_.quickEndConsonant.value());
+    adapter_->setQuickStartConsonant(false);
+    adapter_->setQuickEndConsonant(false);
     adapter_->setUseMacro(config_.enableMacro.value());
     adapter_->setUseMacroInEnglishMode(false);
-    adapter_->setAutoCapsMacro(config_.autoCapsMacro.value());
+    adapter_->setAutoCapsMacro(false);
     adapter_->setUseSmartSwitchKey(false);
     adapter_->setRememberCode(false);
-    adapter_->setOtherLanguage(config_.otherLanguage.value());
-    adapter_->setTempOffSpelling(config_.tempOffSpelling.value());
-    adapter_->setTempOffOpenKey(config_.tempOffOpenKey.value());
+    adapter_->setOtherLanguage(false);
+    adapter_->setTempOffSpelling(false);
+    adapter_->setTempOffOpenKey(false);
 
-    // (Re)load macro file if enabled.
+    // (Re)load macro table if enabled.
     initMacroMap(nullptr, 0);
-    if (config_.enableMacro.value() && !config_.macroFile.value().empty()) {
-        readFromFile(config_.macroFile.value(), false);
+    if (config_.enableMacro.value()) {
+        for (const auto &keymap : macroTables_.macros.value()) {
+            if (!keymap.key.value().empty()) {
+                addMacro(keymap.key.value(), keymap.value.value());
+            }
+        }
     }
 }
 
 void OpenKeyEngine::persistConfig() {
     fcitx::safeSaveAsIni(config_, fcitx::StandardPath::Type::PkgConfig,
                          "conf/openkey.conf");
+    fcitx::safeSaveAsIni(macroTables_, fcitx::StandardPath::Type::PkgConfig,
+                         "conf/openkey-macro-table.conf");
 }
 
 void OpenKeyEngine::save() { persistConfig(); }
+
+const fcitx::Configuration *
+OpenKeyEngine::getSubConfig(const std::string &path) const {
+    if (path == "openkey-macro") {
+        return &macroTables_;
+    }
+    return nullptr;
+}
+
+void OpenKeyEngine::setSubConfig(const std::string &path,
+                                 const fcitx::RawConfig &config) {
+    if (path == "openkey-macro") {
+        macroTables_.load(config, true);
+        fcitx::safeSaveAsIni(macroTables_, fcitx::StandardPath::Type::PkgConfig,
+                             "conf/openkey-macro-table.conf");
+        // Reload macros in memory
+        initMacroMap(nullptr, 0);
+        if (config_.enableMacro.value()) {
+            for (const auto &keymap : macroTables_.macros.value()) {
+                if (!keymap.key.value().empty()) {
+                    addMacro(keymap.key.value(), keymap.value.value());
+                }
+            }
+        }
+    }
+}
 
 void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
                              fcitx::InputContextEvent &event) {
@@ -2904,9 +2952,11 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
     state->delta.clear();
     state->nonPreeditDelta.clear();
     state->composing.clear();
+    state->preeditKeyBuffer.clear();
     state->macroBuffer.clear();
     state->rollbackWord.clear();
     state->rollbackDisplay.clear();
+    state->rollbackRawBuffer.clear();
     state->noSeedNextWord = false;
     state->manualMode = false;
     state->modeDecided = false;
@@ -2943,9 +2993,11 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
     state->delta.clear();
     state->nonPreeditDelta.clear();
     state->composing.clear();
+    state->preeditKeyBuffer.clear();
     state->macroBuffer.clear();
     state->rollbackWord.clear();
     state->rollbackDisplay.clear();
+    state->rollbackRawBuffer.clear();
     ic->inputPanel().reset();
     ic->updatePreedit();
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
@@ -3021,22 +3073,22 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                 state->delta.clear();
                 state->nonPreeditDelta.clear();
                 state->composing.clear();
+                state->preeditKeyBuffer.clear();
                 state->macroBuffer.clear();
-            state->rollbackWord.clear();
-            state->rollbackDisplay.clear();
-            state->noSeedNextWord = false;
-            ic->inputPanel().reset();
-            ic->updatePreedit();
-            ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
-        };
+                state->rollbackWord.clear();
+                state->rollbackDisplay.clear();
+                state->rollbackRawBuffer.clear();
+                state->noSeedNextWord = false;
+                ic->inputPanel().reset();
+                ic->updatePreedit();
+                ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
+            };
 
         bool returnToAuto = false;
         RuntimeMode nextMode;
         if (!state->manualMode) {
             nextMode = RuntimeMode::NonPreeditBackspaceRewrite;
         } else if (state->mode == RuntimeMode::NonPreeditBackspaceRewrite) {
-            nextMode = RuntimeMode::BrowserWayland;
-        } else if (state->mode == RuntimeMode::BrowserWayland) {
             nextMode = RuntimeMode::BackspaceRewriteDelta;
         } else if (state->mode == RuntimeMode::BackspaceRewriteDelta) {
             nextMode = RuntimeMode::SurroundingText;
@@ -3103,14 +3155,12 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                     return "Auto";
                 case RuntimeMode::SurroundingText:
                     return "Non Preedit (Gtk Only)";
-                case RuntimeMode::BrowserWayland:
-                    return "Non Preedit (Browser on Wayland)";
                 case RuntimeMode::Preedit:
                     return "Preedit";
-                case RuntimeMode::BackspaceRewriteDelta:
-                    return "Non Preedit";
                 case RuntimeMode::NonPreeditBackspaceRewrite:
-                    return "Non Preedit 2";
+                    return "Non Preedit";
+                case RuntimeMode::BackspaceRewriteDelta:
+                    return "Non Preedit (Non Server)";
                 case RuntimeMode::DirectCommit:
                     return "Direct";
                 }
@@ -3197,12 +3247,6 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         adapter_->setCodeTable(state->codeTable);
         if (surroundingTextHandler_) {
             surroundingTextHandler_->handleKey(ic, event, *state);
-        }
-        return;
-    case RuntimeMode::BrowserWayland:
-        adapter_->setCodeTable(state->codeTable);
-        if (browserWaylandHandler_) {
-            browserWaylandHandler_->handleKey(ic, event, *state);
         }
         return;
     }

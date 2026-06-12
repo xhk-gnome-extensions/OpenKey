@@ -33,6 +33,7 @@ target_include_directories(openkey PRIVATE
 target_sources(openkey PRIVATE
     src/openkey.cpp
     src/openkey.h
+    src/openkey_config.h
     src/openkey-addon.conf.in.in
     src/openkey.conf.in
     src/openkey_adapter.cpp
@@ -119,6 +120,8 @@ if(GO_EXECUTABLE)
         DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}"
     )
 endif()
+
+
 
 install(
     FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/symbolic/apps/fcitx-openkey-symbolic.svg"
