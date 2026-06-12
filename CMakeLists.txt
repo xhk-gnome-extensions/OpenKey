@@ -106,7 +106,7 @@ if(GO_EXECUTABLE)
         "${CMAKE_CURRENT_BINARY_DIR}/openkey-nonpreedit-server")
     add_custom_command(
         OUTPUT "${OPENKEY_NONPREEDIT_SERVER_BINARY}"
-        COMMAND "${GO_EXECUTABLE}" build -o "${OPENKEY_NONPREEDIT_SERVER_BINARY}" .
+        COMMAND "${GO_EXECUTABLE}" build -buildvcs=false -o "${OPENKEY_NONPREEDIT_SERVER_BINARY}" .
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tools/openkey-nonpreedit-server"
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/tools/openkey-nonpreedit-server/go.mod"
