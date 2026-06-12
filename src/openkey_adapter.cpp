@@ -370,7 +370,6 @@ bool OpenKeyAdapter::restoreFromRawAsciiOnWordBreak(
 
     resetCoreState();
     std::string replayedWord;
-    bool replayEndedWithRestore = false;
     for (unsigned char ch : rawAscii) {
         auto it = _characterMap.find(static_cast<uint32_t>(ch));
         if (it == _characterMap.end()) {
@@ -394,10 +393,7 @@ bool OpenKeyAdapter::restoreFromRawAsciiOnWordBreak(
             }
             if (hookState_->code == vRestore ||
                 hookState_->code == vRestoreAndStartNewSession) {
-                replayEndedWithRestore = true;
                 replayedWord.push_back(static_cast<char>(ch));
-            } else {
-                replayEndedWithRestore = false;
             }
         } else {
             vUseMacro = savedUseMacro;
@@ -415,10 +411,6 @@ bool OpenKeyAdapter::restoreFromRawAsciiOnWordBreak(
 
     if (hookState_->code != vRestore &&
         hookState_->code != vRestoreAndStartNewSession) {
-        if (replayEndedWithRestore && rawAscii != currentWord) {
-            outRestoredWord = rawAscii;
-            return true;
-        }
         // Keep the user's physical `w` sequence when Telex collapses an invalid
         // tail such as `ddww` into a displayed word ending in literal `w`.
         const bool shownEndsWithLiteralW =
