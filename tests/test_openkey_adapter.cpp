@@ -68,6 +68,52 @@ int main() {
     expectEq("truowngf", typeSequence(adapter, "truowngf"), "trường");
     expectEq("nguoiwf", typeSequence(adapter, "nguoiwf"), "người");
     expectEq("ddww", typeSequence(adapter, "ddww"), "đw");
+    expectEq("pussh", typeSequence(adapter, "pussh"), "push");
+    {
+        auto restoreAdapter = makeAdapter();
+        const std::string shown = typeSequence(restoreAdapter, "pussh");
+        std::string restored;
+        if (restoreAdapter.restoreFromRawAsciiOnWordBreak(shown, "pussh", ' ',
+                                                           restored)) {
+            failures++;
+            std::cerr << "[FAIL] restoreFromRaw pussh: expected false, got true (restored to: " << restored << ")\n";
+        }
+    }
+    {
+        auto restoreAdapter = makeAdapter();
+        const std::string shown = typeSequence(restoreAdapter, "wwass");
+        expectEq("wwass shown", shown, "was");
+        std::string restored;
+        if (restoreAdapter.restoreFromRawAsciiOnWordBreak(shown, "wwass", ' ',
+                                                           restored)) {
+            failures++;
+            std::cerr << "[FAIL] restoreFromRaw wwass: expected false, got true (restored to: " << restored << ")\n";
+        }
+    }
+    {
+        auto restoreAdapter = makeAdapter();
+        const std::string shown = typeSequence(restoreAdapter, "thorr");
+        expectEq("thorr shown", shown, "thor");
+        std::string restored;
+        if (restoreAdapter.restoreFromRawAsciiOnWordBreak(shown, "thorr", ' ',
+                                                           restored)) {
+            failures++;
+            std::cerr << "[FAIL] restoreFromRaw thorr: expected false, got true (restored to: " << restored << ")\n";
+        }
+    }
+    {
+        auto restoreAdapter = makeAdapter();
+        const std::string shown = typeSequence(restoreAdapter, "mass");
+        expectEq("mass shown", shown, "mas");
+        std::string restored;
+        if (!restoreAdapter.restoreFromRawAsciiOnWordBreak(shown, "mass", ' ',
+                                                            restored)) {
+            failures++;
+            std::cerr << "[FAIL] restoreFromRaw mass: expected true, got false\n";
+        } else {
+            expectEq("restoreFromRaw mass", restored, "mass");
+        }
+    }
     {
         auto restoreAdapter = makeAdapter();
         std::string restored;
