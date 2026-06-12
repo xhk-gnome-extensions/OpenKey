@@ -30,3 +30,8 @@ compile_commands.json
 *.swo
 .DS_Store
 Thumbs.db
+
+# Packaging outputs
+/pkgroot/
+/dist/
+/build-pkg/

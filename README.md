@@ -180,6 +180,10 @@ cmake --install build
 fcitx5 -rd
 ```
 
+### Đóng gói .deb / .rpm
+
+Xem hướng dẫn đóng gói ở [PACKAGING.md](PACKAGING.md).
+
 ## Bật OpenKey trong Fcitx5
 
 Sau khi cài xong:
