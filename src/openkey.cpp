@@ -594,7 +594,7 @@ static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{1000, 80000};
 static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{1000, 80000};
 static constexpr uint64_t kDeltaPostCommitPumpDelayUsec = 20000;
 
-static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 20000};
+static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 40000};
 static constexpr RewriteTiming kNonPreeditX11Timing{1000, 80000};
 static constexpr RewriteTiming kNonPreeditX11BrowserTiming{1000, 80000};
 static constexpr uint64_t kNonPreeditPostCommitPumpDelayUsec = 20000;
