@@ -585,18 +585,20 @@ struct DeltaRewriteTiming {
 
 // Delta timing tuned based on NonPreedit values
 // Format: {interKeyUsec, commitDelayUsec}
-static constexpr DeltaRewriteTiming kDeltaWaylandTiming{1000, 20000};
-static constexpr DeltaRewriteTiming kDeltaWaylandBrowserTiming{1000, 20000};
-static constexpr DeltaRewriteTiming kDeltaWaylandElectronTiming{1000, 20000};
-static constexpr DeltaRewriteTiming kDeltaX11Timing{1000, 80000};
-static constexpr DeltaRewriteTiming kDeltaWaylandFcitx4Timing{1000, 20000};
-static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{1000, 80000};
-static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{1000, 80000};
-static constexpr uint64_t kDeltaPostCommitPumpDelayUsec = 20000;
+static constexpr DeltaRewriteTiming kDeltaWaylandTiming{2000, 20000};
+static constexpr DeltaRewriteTiming kDeltaWaylandBrowserTiming{2000, 20000};
+static constexpr DeltaRewriteTiming kDeltaWaylandElectronTiming{2000, 20000};
+static constexpr DeltaRewriteTiming kDeltaX11Timing{2000, 80000};
+static constexpr DeltaRewriteTiming kDeltaWaylandFcitx4Timing{2000, 20000};
+static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{2000, 80000};
+static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{2000, 80000};
+static constexpr DeltaRewriteTiming kDeltaFirefoxFarmilyTiming{30000, 80000};
+static constexpr uint64_t kDeltaPostCommitPumpDelayUsec = 10000;
 
-static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 40000};
-static constexpr RewriteTiming kNonPreeditX11Timing{1000, 80000};
-static constexpr RewriteTiming kNonPreeditX11BrowserTiming{1000, 80000};
+static constexpr RewriteTiming kNonPreeditWaylandTiming{2000, 40000};
+static constexpr RewriteTiming kNonPreeditX11Timing{2000, 80000};
+static constexpr RewriteTiming kNonPreeditX11BrowserTiming{2000, 80000};
+static constexpr RewriteTiming kNonPreeditFirefoxFarmilyTiming{30000, 80000};
 static constexpr uint64_t kNonPreeditPostCommitPumpDelayUsec = 10000;
 
 static bool isRunningOnX11(fcitx::InputContext *ic) {
@@ -800,6 +802,9 @@ static DeltaRewriteTiming deltaTimingFor(fcitx::InputContext *ic,
     if (!x11 && fcitx4) {
         return kDeltaWaylandFcitx4Timing;
     }
+    if(isFirefoxLikeProgram(program)) {
+        return kDeltaFirefoxFarmilyTiming;
+    }
     if (!x11 && isBrowserLikeProgram(program)) {
         return kDeltaWaylandBrowserTiming;
     }
@@ -818,6 +823,11 @@ static DeltaRewriteTiming deltaTimingFor(fcitx::InputContext *ic,
 static RewriteTiming nonPreeditTimingFor(fcitx::InputContext *ic,
                                          const std::string &program) {
     const bool x11 = isRunningOnX11(ic);
+
+    if(isFirefoxLikeProgram(program)) {
+        return kNonPreeditFirefoxFarmilyTiming;
+    }
+
     if (x11 && isBrowserLikeProgram(program)) {
         return kNonPreeditX11BrowserTiming;
     }
@@ -3498,10 +3508,6 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
     }
 
     const auto normalizedProgram = normalizedProgramName(s.program);
-    if(isFirefoxLikeProgram(normalizedProgram)) {
-         return RuntimeMode::Preedit;
-    }
-
     auto &appModeMap = appModeMapFor(ic);
     auto it = appModeMap.find(normalizedProgram);
     if (!normalizedProgram.empty() && it != appModeMap.end() &&
