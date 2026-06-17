@@ -597,7 +597,7 @@ static constexpr uint64_t kDeltaPostCommitPumpDelayUsec = 20000;
 static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 40000};
 static constexpr RewriteTiming kNonPreeditX11Timing{1000, 80000};
 static constexpr RewriteTiming kNonPreeditX11BrowserTiming{1000, 80000};
-static constexpr uint64_t kNonPreeditPostCommitPumpDelayUsec = 20000;
+static constexpr uint64_t kNonPreeditPostCommitPumpDelayUsec = 10000;
 
 static bool isRunningOnX11(fcitx::InputContext *ic) {
     (void)ic;
@@ -619,6 +619,31 @@ static bool isFcitx4Frontend(fcitx::InputContext *ic) {
         return false;
     }
     return asciiLower(ic->frontend()).find("fcitx4") != std::string::npos;
+}
+
+static bool isFirefoxLikeProgram(const std::string &program) {
+    if (program.empty()) {
+        return false;
+    }
+
+    const std::string base = normalizedProgramName(program);
+    static const std::vector<std::string> kFirefoxPatterns = {
+        "firefox",
+        "librewolf",
+        "waterfox",
+        "floorp",
+        "zen",
+        "tor-browser",
+        "mullvad",
+        "icecat",
+    };
+
+    for (const auto &pattern : kFirefoxPatterns) {
+        if (base.find(pattern) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool isBrowserLikeProgram(const std::string &program) {
@@ -1240,7 +1265,7 @@ private:
         }
 
         fcitx::Text text;
-        text.append(state.composing, fcitx::TextFormatFlag::Underline);
+        text.append(state.composing);
         text.setCursor(static_cast<int>(state.composing.size()));
 
         if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
@@ -3473,6 +3498,10 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
     }
 
     const auto normalizedProgram = normalizedProgramName(s.program);
+    if(isFirefoxLikeProgram(normalizedProgram)) {
+         return RuntimeMode::Preedit;
+    }
+
     auto &appModeMap = appModeMapFor(ic);
     auto it = appModeMap.find(normalizedProgram);
     if (!normalizedProgram.empty() && it != appModeMap.end() &&
