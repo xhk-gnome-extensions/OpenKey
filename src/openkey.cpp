@@ -650,6 +650,10 @@ static bool isFirefoxLikeProgram(const std::string &program) {
     return false;
 }
 
+static bool needsTransientResetPreserve(const std::string &program) {
+    return isFirefoxLikeProgram(program);
+}
+
 static bool isBrowserLikeProgram(const std::string &program) {
     if (program.empty()) {
         return false;
@@ -813,6 +817,32 @@ static bool isSurroundingTextAvailable(fcitx::InputContext *ic) {
     }
 
     return true;
+}
+
+static bool trackedWordStillBeforeCursor(fcitx::InputContext *ic,
+                                         const std::string &shownText,
+                                         bool requireSurroundingText) {
+    if (!ic || shownText.empty()) {
+        return false;
+    }
+
+    if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+        return !requireSurroundingText;
+    }
+
+    const auto &st = ic->surroundingText();
+    if (!st.isValid()) {
+        return !requireSurroundingText;
+    }
+
+    if (st.cursor() != st.anchor() ||
+        st.cursor() > fcitx::utf8::length(st.text())) {
+        return false;
+    }
+
+    WordSegment seg;
+    return extractWordBeforeCursor(st.text(), st.cursor(), seg) &&
+           seg.word == shownText;
 }
 
 
@@ -1681,6 +1711,12 @@ public:
         }
 
         if (isBackspace()) {
+            if (needsTransientResetPreserve(state.program) &&
+                !deltaState.shownText.empty() &&
+                !trackedWordStillBeforeCursor(ic, deltaState.shownText, false)) {
+                clearWordState(deltaState);
+                return false;
+            }
             if (restoreBackspaceSnapshot(deltaState)) {
                 return true;
             }
@@ -1693,6 +1729,8 @@ public:
                     deltaState.rawAsciiBuffer.clear();
                     deltaState.hasRewrittenCurrentWord = false;
                 }
+                deltaState.allowTransientResetPreserve =
+                    !deltaState.shownText.empty();
             }
             return false;
         }
@@ -1859,6 +1897,7 @@ private:
         deltaState.hasRewrittenCurrentWord = false;
         deltaState.restoredFromBackspaceSnapshot = false;
         deltaState.allowBackspaceSnapshotResetPreserve = false;
+        deltaState.allowTransientResetPreserve = false;
         deltaState.rewriteLock = false;
         deltaState.waitingBackspaceAck = false;
         deltaState.processingQueue = false;
@@ -1943,6 +1982,7 @@ private:
             ic->commitString(commitText);
         }
         deltaState.shownText = shownAfter;
+        deltaState.allowTransientResetPreserve = !deltaState.shownText.empty();
         deltaState.waitingBackspaceAck = false;
         deltaState.expectedBackspaces = 0;
         deltaState.seenBackspaces = 0;
@@ -2125,6 +2165,7 @@ private:
                 deltaState.hasRewrittenCurrentWord || (newWord != rawAppend);
             deltaState.restoredFromBackspaceSnapshot = false;
             deltaState.allowBackspaceSnapshotResetPreserve = false;
+            deltaState.allowTransientResetPreserve = true;
             return true;
         }
 
@@ -2148,6 +2189,7 @@ private:
                 deltaState.hasRewrittenCurrentWord || (newWord != rawAppend);
             deltaState.restoredFromBackspaceSnapshot = false;
             deltaState.allowBackspaceSnapshotResetPreserve = false;
+            deltaState.allowTransientResetPreserve = true;
             scheduleAckTimeout(ic, state, timing, static_cast<int>(deleteCount));
             return true;
         }
@@ -2184,6 +2226,8 @@ private:
             rememberBackspaceSnapshot(deltaState);
             forwardKeyPressAndRelease(ic, boundaryKey);
             clearWordState(deltaState, false);
+            deltaState.allowBackspaceSnapshotResetPreserve =
+                needsTransientResetPreserve(state.program) && trigger == ' ';
         }
         return true;
     }
@@ -2224,6 +2268,8 @@ private:
             rememberBackspaceSnapshot(deltaState);
             forwardKeyPressAndRelease(ic, boundaryKey);
             clearWordState(deltaState, false);
+            deltaState.allowBackspaceSnapshotResetPreserve =
+                needsTransientResetPreserve(state.program) && trigger == ' ';
         }
         return true;
     }
@@ -2245,6 +2291,12 @@ private:
         }
 
         if (key.check(FcitxKey_BackSpace)) {
+            if (needsTransientResetPreserve(state.program) &&
+                !deltaState.shownText.empty() &&
+                !trackedWordStillBeforeCursor(ic, deltaState.shownText, false)) {
+                clearWordState(deltaState);
+                return false;
+            }
             if (!restoreBackspaceSnapshot(deltaState)) {
                 clearWordState(deltaState);
             }
@@ -2269,6 +2321,8 @@ private:
                 }
                 rememberBackspaceSnapshot(deltaState);
                 clearWordState(deltaState, false);
+                deltaState.allowBackspaceSnapshotResetPreserve =
+                    needsTransientResetPreserve(state.program) && c == ' ';
                 return false;
             }
 
@@ -2282,6 +2336,13 @@ private:
             if (deltaState.shownText.empty() &&
                 deltaState.canReseedFromBackspaceSnapshot) {
                 clearBackspaceSnapshot(deltaState);
+            }
+
+            if (needsTransientResetPreserve(state.program) &&
+                !deltaState.shownText.empty() &&
+                !trackedWordStillBeforeCursor(ic, deltaState.shownText, false)) {
+                clearWordState(deltaState);
+                return false;
             }
 
             if (!adapterShared) {
@@ -2364,6 +2425,13 @@ public:
         }
 
         if (isBackspace()) {
+            if (needsTransientResetPreserve(state.program) &&
+                !nonPreeditState.shownText.empty() &&
+                !trackedWordStillBeforeCursor(ic, nonPreeditState.shownText,
+                                              false)) {
+                clearComposeState(nonPreeditState, "backspace-cursor-mismatch");
+                return false;
+            }
             if (restoreBackspaceSnapshot(nonPreeditState)) {
                 return true;
             }
@@ -2377,6 +2445,8 @@ public:
                     nonPreeditState.rawAsciiBuffer.clear();
                     nonPreeditState.hasRewrittenCurrentWord = false;
                 }
+                nonPreeditState.allowTransientResetPreserve =
+                    !nonPreeditState.shownText.empty();
             }
             return false; // để app tự xóa ký tự trên màn hình
         }
@@ -2580,6 +2650,7 @@ private:
         nonPreeditState.hasRewrittenCurrentWord = false;
         nonPreeditState.restoredFromBackspaceSnapshot = false;
         nonPreeditState.allowBackspaceSnapshotResetPreserve = false;
+        nonPreeditState.allowTransientResetPreserve = false;
         nonPreeditState.rewriteLock = false;
         nonPreeditState.waitingBackspaceAck = false;
         nonPreeditState.processingNonPreedit = false;
@@ -2613,6 +2684,8 @@ private:
             ic->commitString(commitText);
         }
         nonPreeditState.shownText = shownAfter;
+        nonPreeditState.allowTransientResetPreserve =
+            !nonPreeditState.shownText.empty();
         nonPreeditState.waitingBackspaceAck = false;
         nonPreeditState.expectedBackspaces = 0;
         nonPreeditState.seenBackspaces = 0;
@@ -2739,6 +2812,7 @@ private:
                 nonPreeditState.hasRewrittenCurrentWord || (newWord != rawAppend);
             nonPreeditState.restoredFromBackspaceSnapshot = false;
             nonPreeditState.allowBackspaceSnapshotResetPreserve = false;
+            nonPreeditState.allowTransientResetPreserve = true;
             return true;
         }
 
@@ -2754,6 +2828,7 @@ private:
                 nonPreeditState.hasRewrittenCurrentWord || (newWord != rawAppend);
             nonPreeditState.restoredFromBackspaceSnapshot = false;
             nonPreeditState.allowBackspaceSnapshotResetPreserve = false;
+            nonPreeditState.allowTransientResetPreserve = true;
             if (deps_.nonPreeditRemoteSchedule(
                     ic, state, deleteCount, timing.interKeyUsec,
                     timing.commitDelayUsec)) {
@@ -2804,6 +2879,8 @@ private:
             rememberBackspaceSnapshot(nonPreeditState);
             forwardKeyPressAndRelease(ic, boundaryKey);
             clearComposeState(nonPreeditState, "macro-boundary", false);
+            nonPreeditState.allowBackspaceSnapshotResetPreserve =
+                needsTransientResetPreserve(state.program) && trigger == ' ';
         }
         return true;
     }
@@ -2844,6 +2921,8 @@ private:
             rememberBackspaceSnapshot(nonPreeditState);
             forwardKeyPressAndRelease(ic, boundaryKey);
             clearComposeState(nonPreeditState, "restore-boundary", false);
+            nonPreeditState.allowBackspaceSnapshotResetPreserve =
+                needsTransientResetPreserve(state.program) && trigger == ' ';
         }
         return true;
     }
@@ -2870,6 +2949,13 @@ private:
         }
 
         if (nonPreeditKey.check(FcitxKey_BackSpace)) {
+            if (needsTransientResetPreserve(state.program) &&
+                !nonPreeditState.shownText.empty() &&
+                !trackedWordStillBeforeCursor(ic, nonPreeditState.shownText,
+                                              false)) {
+                clearComposeState(nonPreeditState, "backspace-cursor-mismatch");
+                return false;
+            }
             if (restoreBackspaceSnapshot(nonPreeditState)) {
                 return false;
             }
@@ -2893,6 +2979,8 @@ private:
                 nonPreeditState.rawAsciiBuffer.clear();
                 nonPreeditState.hasRewrittenCurrentWord = false;
             }
+            nonPreeditState.allowTransientResetPreserve =
+                !nonPreeditState.shownText.empty();
             return true;
         }
 
@@ -2915,6 +3003,8 @@ private:
                 }
                 rememberBackspaceSnapshot(nonPreeditState);
                 clearComposeState(nonPreeditState, "boundary", false);
+                nonPreeditState.allowBackspaceSnapshotResetPreserve =
+                    needsTransientResetPreserve(state.program) && c == ' ';
                 return false;
             }
 
@@ -2928,6 +3018,14 @@ private:
             if (nonPreeditState.shownText.empty() &&
                 nonPreeditState.canReseedFromBackspaceSnapshot) {
                 clearBackspaceSnapshot(nonPreeditState);
+            }
+
+            if (needsTransientResetPreserve(state.program) &&
+                !nonPreeditState.shownText.empty() &&
+                !trackedWordStillBeforeCursor(ic, nonPreeditState.shownText,
+                                              false)) {
+                clearComposeState(nonPreeditState, "ascii-cursor-mismatch");
+                return false;
             }
 
             if (!adapterShared) {
@@ -3390,17 +3488,17 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
     auto *state = stateFor(ic);
     const bool snapshotEnabled = config_.enableBackspaceSnapshot.value();
 
-    const bool firefoxResetKeepDelta =
-        isFirefoxLikeProgram(state->program) &&
+    const bool transientResetKeepDelta =
+        needsTransientResetPreserve(state->program) &&
         state->mode == RuntimeMode::BackspaceRewriteDelta &&
         !state->delta.shownText.empty() &&
         !state->delta.rawAsciiBuffer.empty() &&
-        state->delta.shownText == state->delta.rawAsciiBuffer &&
+        state->delta.allowTransientResetPreserve &&
         !state->delta.rewriteLock &&
         !state->delta.waitingBackspaceAck;
 
     const bool preserveDelta =
-        firefoxResetKeepDelta ||
+        transientResetKeepDelta ||
         (
             snapshotEnabled &&
             state->delta.restoredFromBackspaceSnapshot &&
@@ -3419,6 +3517,8 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
     const std::string deltaShown = state->delta.shownText;
     const std::string deltaRaw = state->delta.rawAsciiBuffer;
     const bool deltaRewritten = state->delta.hasRewrittenCurrentWord;
+    const bool deltaAllowTransientResetPreserve =
+        state->delta.allowTransientResetPreserve;
     const std::string deltaSnapshotShown =
         state->delta.backspaceSnapshotShownText;
     const std::string deltaSnapshotRaw =
@@ -3426,16 +3526,16 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
     const bool deltaSnapshotRewritten =
         state->delta.backspaceSnapshotHasRewrittenCurrentWord;
 
-    const bool firefoxResetKeepNonPreedit =
-        isFirefoxLikeProgram(state->program) &&
+    const bool transientResetKeepNonPreedit =
+        needsTransientResetPreserve(state->program) &&
         state->mode == RuntimeMode::NonPreeditBackspaceRewrite &&
         !state->nonPreeditDelta.shownText.empty() &&
         !state->nonPreeditDelta.rawAsciiBuffer.empty() &&
-        state->nonPreeditDelta.shownText == state->nonPreeditDelta.rawAsciiBuffer &&
+        state->nonPreeditDelta.allowTransientResetPreserve &&
         !state->nonPreeditDelta.rewriteLock;
 
     const bool preserveNonPreedit =
-        firefoxResetKeepNonPreedit ||
+        transientResetKeepNonPreedit ||
         (
             snapshotEnabled &&
             state->nonPreeditDelta.restoredFromBackspaceSnapshot &&
@@ -3455,6 +3555,8 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
     const std::string nonPreeditRaw = state->nonPreeditDelta.rawAsciiBuffer;
     const bool nonPreeditRewritten =
         state->nonPreeditDelta.hasRewrittenCurrentWord;
+    const bool nonPreeditAllowTransientResetPreserve =
+        state->nonPreeditDelta.allowTransientResetPreserve;
     const std::string nonPreeditSnapshotShown =
         state->nonPreeditDelta.backspaceSnapshotShownText;
     const std::string nonPreeditSnapshotRaw =
@@ -3466,15 +3568,18 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
         FCITX_INFO() << "openkey: reset"
                      << " program=" << state->program
                      << " snapshotEnabled=" << snapshotEnabled
-                     << " firefoxResetKeepDelta=" << firefoxResetKeepDelta
+                     << " transientResetKeepDelta="
+                     << transientResetKeepDelta
                      << " preserveDelta=" << preserveDelta
                      << " preserveDeltaSnapshot=" << preserveDeltaSnapshot
                      << " deltaAllowPreserve="
                      << state->delta.allowBackspaceSnapshotResetPreserve
                      << " deltaShown=" << state->delta.shownText
                      << " deltaRaw=" << state->delta.rawAsciiBuffer
-                     << " firefoxResetKeepNonPreedit="
-                     << firefoxResetKeepNonPreedit
+                     << " deltaAllowTransientResetPreserve="
+                     << state->delta.allowTransientResetPreserve
+                     << " transientResetKeepNonPreedit="
+                     << transientResetKeepNonPreedit
                      << " preserveNonPreedit=" << preserveNonPreedit
                      << " preserveNonPreeditSnapshot="
                      << preserveNonPreeditSnapshot
@@ -3483,7 +3588,9 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
                      << " nonPreeditShown="
                      << state->nonPreeditDelta.shownText
                      << " nonPreeditRaw="
-                     << state->nonPreeditDelta.rawAsciiBuffer;
+                     << state->nonPreeditDelta.rawAsciiBuffer
+                     << " nonPreeditAllowTransientResetPreserve="
+                     << state->nonPreeditDelta.allowTransientResetPreserve;
     }
 
     state->delta.clear();
@@ -3493,7 +3600,9 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
         state->delta.shownText = deltaShown;
         state->delta.rawAsciiBuffer = deltaRaw;
         state->delta.hasRewrittenCurrentWord = deltaRewritten;
-        state->delta.restoredFromBackspaceSnapshot = false;  // Firefox giữ delta, không phải restore từ snapshot
+        state->delta.allowTransientResetPreserve =
+            deltaAllowTransientResetPreserve;
+        state->delta.restoredFromBackspaceSnapshot = false;  // Transient reset preserve, not a snapshot restore.
         state->delta.allowBackspaceSnapshotResetPreserve = false;
         if (debugEnabled()) {
             FCITX_INFO() << "openkey: reset preserve"
@@ -3527,7 +3636,9 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
         state->nonPreeditDelta.shownText = nonPreeditShown;
         state->nonPreeditDelta.rawAsciiBuffer = nonPreeditRaw;
         state->nonPreeditDelta.hasRewrittenCurrentWord = nonPreeditRewritten;
-        state->nonPreeditDelta.restoredFromBackspaceSnapshot = false;  // Firefox giữ delta, không phải restore từ snapshot
+        state->nonPreeditDelta.allowTransientResetPreserve =
+            nonPreeditAllowTransientResetPreserve;
+        state->nonPreeditDelta.restoredFromBackspaceSnapshot = false;  // Transient reset preserve, not a snapshot restore.
         state->nonPreeditDelta.allowBackspaceSnapshotResetPreserve = false;
         if (debugEnabled()) {
             FCITX_INFO() << "openkey: reset preserve"
