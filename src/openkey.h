@@ -65,6 +65,7 @@ struct DeltaRewriteState {
     bool restoredFromBackspaceSnapshot = false;
     bool preserveBackspaceSnapshotAfterBoundaryBackspace = false;
     bool allowBackspaceSnapshotResetPreserve = false;
+    bool allowTransientResetPreserve = false;
 
     bool hasPendingRewrite() const {
         return rewriteLock || waitingBackspaceAck ||
@@ -97,6 +98,7 @@ struct DeltaRewriteState {
         restoredFromBackspaceSnapshot = false;
         preserveBackspaceSnapshotAfterBoundaryBackspace = false;
         allowBackspaceSnapshotResetPreserve = false;
+        allowTransientResetPreserve = false;
     }
 };
 
@@ -127,6 +129,7 @@ struct NonPreeditDeltaRewriteState {
     bool restoredFromBackspaceSnapshot = false;
     bool preserveBackspaceSnapshotAfterBoundaryBackspace = false;
     bool allowBackspaceSnapshotResetPreserve = false;
+    bool allowTransientResetPreserve = false;
 
     bool hasRemoteRewritePending() const {
         return remoteRewritePending || remotePendingTxId != 0;
@@ -161,6 +164,7 @@ struct NonPreeditDeltaRewriteState {
         restoredFromBackspaceSnapshot = false;
         preserveBackspaceSnapshotAfterBoundaryBackspace = false;
         allowBackspaceSnapshotResetPreserve = false;
+        allowTransientResetPreserve = false;
     }
 };
 
