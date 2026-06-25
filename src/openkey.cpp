@@ -557,7 +557,6 @@ static std::string runtimeModeToString(RuntimeMode mode) {
     switch (mode) {
     case RuntimeMode::Auto:           return "auto";
     case RuntimeMode::Preedit:        return "preedit";
-    case RuntimeMode::SurroundingText:return "surrounding";
     case RuntimeMode::BackspaceRewrite: return "nonPreedit";
     case RuntimeMode::DirectCommit:   return "direct";
     }
@@ -568,7 +567,6 @@ static bool runtimeModeFromString(const std::string &mode, RuntimeMode &out) {
     // Accept the legacy persisted token for backward compatibility.
     if (equalsASCIIInsensitive(mode, "auto"))        { out = RuntimeMode::Auto; return true; }
     if (equalsASCIIInsensitive(mode, "preedit"))     { out = RuntimeMode::Preedit; return true; }
-    if (equalsASCIIInsensitive(mode, "surrounding")) { out = RuntimeMode::SurroundingText; return true; }
     if (equalsASCIIInsensitive(mode, "nonPreedit"))  { out = RuntimeMode::BackspaceRewrite; return true; }
     if (equalsASCIIInsensitive(mode, "direct"))      { out = RuntimeMode::DirectCommit; return true; }
     return false;
@@ -771,28 +769,6 @@ static bool looksLikeBrowserAutocomplete(fcitx::InputContext *ic,
     }
 
     return false;
-}
-
-static bool isSurroundingTextAvailable(fcitx::InputContext *ic) {
-    if (!ic) {
-        return false;
-    }
-
-    if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
-        return false;
-    }
-
-    const auto &st = ic->surroundingText();
-
-    if (!st.isValid()) {
-        return false;
-    }
-
-    if (st.cursor() != st.anchor()) {
-        return false;
-    }
-
-    return true;
 }
 
 static bool trackedWordStillBeforeCursor(fcitx::InputContext *ic,
@@ -1109,13 +1085,10 @@ struct BackspaceRewriteDeps {
         remoteSchedule;
 };
 
-// Deps shared by PreeditModeHandler and SurroundingTextModeHandler.
 struct SimpleModeHandlerDeps {
     std::shared_ptr<OpenKeyAdapter> adapter;
-    std::function<bool()> debugEnabled;
     std::function<bool()> enableMacro;
     std::function<bool()> restoreIfWrongSpelling;
-    std::function<bool()> enableBackspaceSnapshot;
 };
 
 // ---------------------------------------------------------------------------
@@ -1138,7 +1111,6 @@ public:
             std::string out = state.composing;
             out += suffixUtf8;
             ic->commitString(out);
-            state.lastCommitted = state.composing;
             state.composing.clear();
             state.preeditKeyBuffer.clear();
             updatePreeditUI(ic, state);
@@ -1300,367 +1272,9 @@ private:
             return;
         }
         ic->commitString(state.composing);
-        state.lastCommitted = state.composing;
         state.composing.clear();
         state.preeditKeyBuffer.clear();
         updatePreeditUI(ic, state);
-    }
-
-    SimpleModeHandlerDeps deps_;
-};
-
-// ---------------------------------------------------------------------------
-// SurroundingTextModeHandler
-// ---------------------------------------------------------------------------
-
-class SurroundingTextModeHandler final : public InputModeHandler {
-public:
-    explicit SurroundingTextModeHandler(SimpleModeHandlerDeps deps)
-        : deps_(std::move(deps)) {}
-
-    bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
-                   OpenKeyState &state) override {
-        auto key = event.key().normalize();
-
-        // Preedit buffer should be empty in surrounding mode.
-        state.composing.clear();
-
-        const bool debug = deps_.debugEnabled && deps_.debugEnabled();
-
-        if (debug) {
-            FCITX_INFO() << "openkey: st key program=" << state.program
-                         << " sym=" << key.sym()
-                         << " rollbackDisplay=" << state.rollbackDisplay
-                         << " rollbackWord=" << state.rollbackWord;
-        }
-
-        if (key.check(FcitxKey_Delete) || key.isCursorMove()) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            state.noSeedNextWord = false;
-            return false;
-        }
-
-        if (key.check(FcitxKey_BackSpace)) {
-            if (!state.rollbackWord.empty()) {
-                if (!fcitx::utf8::validate(state.rollbackWord) ||
-                    !fcitx::utf8::validate(state.rollbackDisplay)) {
-                    state.rollbackWord.clear();
-                    state.rollbackDisplay.clear();
-                    state.rollbackRawBuffer.clear();
-                    clearRollbackSnapshot(state);
-                    return false;
-                }
-                const auto len = fcitx::utf8::length(state.rollbackWord);
-                if (len > 0) {
-                    auto it = fcitx::utf8::nextNChar(state.rollbackWord.begin(), len - 1);
-                    state.rollbackWord.erase(it, state.rollbackWord.end());
-                } else {
-                    state.rollbackWord.clear();
-                }
-
-                std::string newDisplay = state.rollbackWord;
-                const std::size_t prefixLen =
-                    commonPrefixBytesUTF8Boundary(state.rollbackDisplay, newDisplay);
-                const unsigned int deleteChars =
-                    utf8CharCount(state.rollbackDisplay.substr(prefixLen));
-                if (deleteChars > 128) {
-                    state.rollbackWord.clear();
-                    state.rollbackDisplay.clear();
-                    state.rollbackRawBuffer.clear();
-                    clearRollbackSnapshot(state);
-                    return false;
-                }
-                if (deleteChars > 0) {
-                    ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-                }
-                if (newDisplay.size() > prefixLen) {
-                    ic->commitString(newDisplay.substr(prefixLen));
-                }
-                state.rollbackDisplay = std::move(newDisplay);
-                if (!state.rollbackRawBuffer.empty()) {
-                    state.rollbackRawBuffer.pop_back();
-                }
-                if (state.rollbackDisplay.empty()) {
-                    state.rollbackRawBuffer.clear();
-                }
-                if (debug) {
-                    FCITX_INFO() << "openkey: st bs program=" << state.program
-                                 << " deleteChars=" << deleteChars
-                                 << " newDisplay=" << state.rollbackDisplay;
-                }
-                event.filterAndAccept();
-                return true;
-            }
-            if (restoreRollbackSnapshotAfterBoundary(state, debug)) {
-                return false;
-            }
-            if (!state.macroBuffer.empty()) {
-                state.macroBuffer.pop_back();
-            }
-            return false;
-        }
-
-        if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
-            key.check(FcitxKey_ISO_Enter)) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            state.noSeedNextWord = false;
-            return false;
-        }
-
-        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
-        if (!(uni >= 0x20 && uni <= 0x7E)) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            state.noSeedNextWord = false;
-            return false;
-        }
-        const char c = static_cast<char>(uni);
-
-        if (isComposingASCII(c) && !state.rollbackDisplay.empty()) {
-            const auto &st = ic->surroundingText();
-            if (!st.isValid() || st.cursor() != st.anchor() ||
-                !fcitx::utf8::validate(st.text()) ||
-                st.cursor() > fcitx::utf8::length(st.text())) {
-                state.rollbackWord.clear();
-                state.rollbackDisplay.clear();
-                state.rollbackRawBuffer.clear();
-                clearRollbackSnapshot(state);
-                return false;
-            }
-            WordSegment seg;
-            if (!extractWordBeforeCursor(st.text(), st.cursor(), seg) ||
-                seg.word != state.rollbackDisplay) {
-                if (debug) {
-                    FCITX_INFO() << "openkey: st desync program=" << state.program
-                                 << " expected=" << state.rollbackDisplay
-                                 << " actual=" << seg.word;
-                }
-                state.rollbackWord.clear();
-                state.rollbackDisplay.clear();
-                state.rollbackRawBuffer.clear();
-                clearRollbackSnapshot(state);
-                return false;
-            }
-        }
-
-        auto replaceRollbackDisplay = [&](const std::string &replacement) {
-            const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
-            if (deleteChars == 0 || deleteChars > 128) {
-                return false;
-            }
-            ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-            ic->commitString(replacement);
-            state.rollbackWord = replacement;
-            state.rollbackDisplay = replacement;
-            state.rollbackRawBuffer.clear();
-            state.lastCommitted = replacement;
-            return true;
-        };
-
-        auto expandMacroBeforeBoundary = [&](char trigger) {
-            if (!deps_.enableMacro || !deps_.enableMacro() ||
-                !isMacroTriggerKey(trigger) || state.rollbackDisplay.empty()) {
-                return false;
-            }
-            std::string replacement;
-            if (!deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
-                return false;
-            }
-            return replaceRollbackDisplay(replacement);
-        };
-
-        auto restoreBeforeBoundary = [&](char trigger) {
-            if (!deps_.restoreIfWrongSpelling ||
-                !deps_.restoreIfWrongSpelling() ||
-                state.rollbackDisplay.empty()) {
-                return false;
-            }
-            std::string restoredWord;
-            const bool restored =
-                !state.rollbackRawBuffer.empty()
-                    ? deps_.adapter->restoreFromRawAsciiOnWordBreak(
-                          state.rollbackDisplay, state.rollbackRawBuffer, trigger,
-                          restoredWord)
-                    : deps_.adapter->restoreOnWordBreak(state.rollbackDisplay,
-                                                       trigger, restoredWord);
-            if (!restored) {
-                return false;
-            }
-            return replaceRollbackDisplay(restoredWord);
-        };
-
-        if (isBoundaryASCII(c)) {
-            if (!expandMacroBeforeBoundary(c)) {
-                restoreBeforeBoundary(c);
-            }
-            rememberRollbackSnapshot(state);
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            state.noSeedNextWord = true;
-            return false;
-        }
-
-        if (!isComposingASCII(c)) {
-            if (!expandMacroBeforeBoundary(c)) {
-                restoreBeforeBoundary(c);
-            }
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            state.noSeedNextWord = true;
-            return false;
-        }
-
-        if (state.noSeedNextWord) {
-            state.noSeedNextWord = false;
-            clearRollbackSnapshot(state);
-        } else if (state.rollbackWord.empty()) {
-            auto &st = ic->surroundingText();
-            if (st.isValid() && st.cursor() == st.anchor()) {
-                WordSegment seg;
-                if (extractWordBeforeCursor(st.text(), st.cursor(), seg)) {
-                    state.rollbackWord = seg.word;
-                    state.rollbackDisplay = seg.word;
-                    state.rollbackRawBuffer.clear();
-                    if (debug) {
-                        FCITX_INFO() << "openkey: st seed program=" << state.program
-                                     << " st.cursor=" << st.cursor()
-                                     << " st.textLen=" << fcitx::utf8::length(st.text())
-                                     << " seed=" << seg.word;
-                    }
-                }
-            }
-        }
-
-        auto r = deps_.adapter->processAsciiKey(state.rollbackWord, c);
-        if (!r.handled) {
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            return false;
-        }
-        if (!fcitx::utf8::validate(r.newWord)) {
-            if (debug) {
-                FCITX_WARN() << "openkey: invalid utf8 from adapter program="
-                             << state.program;
-            }
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            return false;
-        }
-
-        const std::size_t prefixLen =
-            commonPrefixBytesUTF8Boundary(state.rollbackDisplay, r.newWord);
-        const unsigned int deleteChars =
-            utf8CharCount(state.rollbackDisplay.substr(prefixLen));
-        if (deleteChars > 128) {
-            if (debug) {
-                FCITX_WARN() << "openkey: deleteChars too large program="
-                             << state.program << " deleteChars=" << deleteChars
-                             << " rollbackDisplay=" << state.rollbackDisplay
-                             << " newWord=" << r.newWord;
-            }
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            return false;
-        }
-        if (deleteChars > 0) {
-            ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-        }
-        if (r.newWord.size() > prefixLen) {
-            ic->commitString(r.newWord.substr(prefixLen));
-        }
-        if (debug) {
-            FCITX_INFO() << "openkey: st apply program=" << state.program
-                         << " deleteChars=" << deleteChars
-                         << " commitDelta=" << r.newWord.substr(prefixLen)
-                         << " newWord=" << r.newWord;
-        }
-
-        state.rollbackWord = r.newWord;
-        state.rollbackDisplay = r.newWord;
-        state.rollbackRawBuffer.push_back(c);
-        state.lastCommitted = state.rollbackDisplay;
-        event.filterAndAccept();
-        return true;
-    }
-
-    void reset(OpenKeyState &state) override {
-        state.macroBuffer.clear();
-        state.rollbackWord.clear();
-        state.rollbackDisplay.clear();
-        state.rollbackRawBuffer.clear();
-        clearRollbackSnapshot(state);
-        state.noSeedNextWord = false;
-    }
-
-private:
-    void clearRollbackSnapshot(OpenKeyState &state) const {
-        state.rollbackSnapshotWord.clear();
-        state.rollbackSnapshotDisplay.clear();
-        state.rollbackSnapshotRawBuffer.clear();
-        state.canReseedRollbackSnapshot = false;
-    }
-
-    void rememberRollbackSnapshot(OpenKeyState &state) const {
-        if (deps_.enableBackspaceSnapshot &&
-            !deps_.enableBackspaceSnapshot()) {
-            clearRollbackSnapshot(state);
-            return;
-        }
-        if (state.rollbackDisplay.empty()) {
-            clearRollbackSnapshot(state);
-            return;
-        }
-        state.rollbackSnapshotWord = state.rollbackWord;
-        state.rollbackSnapshotDisplay = state.rollbackDisplay;
-        state.rollbackSnapshotRawBuffer = state.rollbackRawBuffer;
-        state.canReseedRollbackSnapshot = true;
-    }
-
-    bool restoreRollbackSnapshotAfterBoundary(OpenKeyState &state,
-                                              bool debug) const {
-        if (deps_.enableBackspaceSnapshot &&
-            !deps_.enableBackspaceSnapshot()) {
-            clearRollbackSnapshot(state);
-            return false;
-        }
-        if (!state.canReseedRollbackSnapshot ||
-            state.rollbackSnapshotDisplay.empty()) {
-            return false;
-        }
-        state.rollbackWord = state.rollbackSnapshotWord;
-        state.rollbackDisplay = state.rollbackSnapshotDisplay;
-        state.rollbackRawBuffer = state.rollbackSnapshotRawBuffer;
-        state.noSeedNextWord = false;
-        clearRollbackSnapshot(state);
-        if (debug) {
-            FCITX_INFO() << "openkey: st snapshot restore"
-                         << " program=" << state.program
-                         << " rollbackDisplay=" << state.rollbackDisplay
-                         << " rollbackRaw=" << state.rollbackRawBuffer;
-        }
-        return true;
     }
 
     SimpleModeHandlerDeps deps_;
@@ -2407,16 +2021,12 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
 
     SimpleModeHandlerDeps simpleDeps;
     simpleDeps.adapter = adapter_;
-    simpleDeps.debugEnabled = [this]() { return debugEnabled(); };
     simpleDeps.enableMacro = [this]() { return config_.enableMacro.value(); };
     simpleDeps.restoreIfWrongSpelling = [this]() {
         return config_.restoreIfWrongSpelling.value();
     };
-    simpleDeps.enableBackspaceSnapshot = [this]() {
-        return config_.enableBackspaceSnapshot.value();
-    };
-    preeditHandler_ = std::make_unique<PreeditModeHandler>(simpleDeps);
-    surroundingTextHandler_ = std::make_unique<SurroundingTextModeHandler>(std::move(simpleDeps));
+    preeditHandler_ =
+        std::make_unique<PreeditModeHandler>(std::move(simpleDeps));
     reloadConfig();
     if (remoteRewriteCoordinator_) {
         remoteRewriteCoordinator_->ensureAvailableOrStartOnce();
@@ -2455,8 +2065,6 @@ std::string OpenKeyEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
         switch (m) {
         case RuntimeMode::Auto:
             return "Auto";
-        case RuntimeMode::SurroundingText:
-            return "Non Preedit (Gtk Only)";
         case RuntimeMode::Preedit:
             return "Preedit";
         case RuntimeMode::BackspaceRewrite:
@@ -2484,8 +2092,6 @@ std::string OpenKeyEngine::subMode(const fcitx::InputMethodEntry &,
     switch (state->mode) {
     case RuntimeMode::Auto:
         return "Auto";
-    case RuntimeMode::SurroundingText:
-        return "Non Preedit (Gtk Only)";
     case RuntimeMode::Preedit:
         return "Preedit";
     case RuntimeMode::BackspaceRewrite:
@@ -2718,15 +2324,6 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
     state->rewriteState.clear();
     state->composing.clear();
     state->preeditKeyBuffer.clear();
-    state->macroBuffer.clear();
-    state->rollbackWord.clear();
-    state->rollbackDisplay.clear();
-    state->rollbackRawBuffer.clear();
-    state->rollbackSnapshotWord.clear();
-    state->rollbackSnapshotDisplay.clear();
-    state->rollbackSnapshotRawBuffer.clear();
-    state->canReseedRollbackSnapshot = false;
-    state->noSeedNextWord = false;
     state->manualMode = false;
     state->modeDecided = false;
     state->program = ic->program();
@@ -2863,14 +2460,6 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
 
     state->composing.clear();
     state->preeditKeyBuffer.clear();
-    state->macroBuffer.clear();
-    state->rollbackWord.clear();
-    state->rollbackDisplay.clear();
-    state->rollbackRawBuffer.clear();
-    state->rollbackSnapshotWord.clear();
-    state->rollbackSnapshotDisplay.clear();
-    state->rollbackSnapshotRawBuffer.clear();
-    state->canReseedRollbackSnapshot = false;
 
     ic->inputPanel().reset();
     ic->updatePreedit();
@@ -2895,15 +2484,6 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
             hasRewriteServer) {
             return it->second;
         }
-        if (it->second == RuntimeMode::SurroundingText) {
-            if (isRunningOnX11(ic) && isSurroundingTextAvailable(ic)) {
-                return it->second;
-            }
-            // Fallback tạm thời, không writeBack để không mất config
-            return hasRewriteServer
-                       ? RuntimeMode::BackspaceRewrite
-                       : RuntimeMode::Preedit;
-        }
         if (it->second == RuntimeMode::Preedit ||
             it->second == RuntimeMode::DirectCommit) {
             return it->second;
@@ -2920,8 +2500,6 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
     RuntimeMode mode;
     if (isFirefoxLikeProgram(s.program)) {
         mode = RuntimeMode::Preedit;
-    } else if (isRunningOnX11(ic) && isSurroundingTextAvailable(ic)) {
-        mode = RuntimeMode::SurroundingText;
     } else {
         mode = rewriteServerAvailable()
                    ? RuntimeMode::BackspaceRewrite
@@ -2959,19 +2537,17 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     }
 
     if (key.checkKeyList(config_.switchModeKey.value()) && key.sym() != FcitxKey_None) {
+        // DirectCommit is reserved for protected contexts such as password
+        // fields and is intentionally excluded from manual mode switching.
+        if (state->mode == RuntimeMode::DirectCommit &&
+            ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)) {
+            return;
+        }
+
         auto clearComposingState = [this, ic, state]() {
                 state->rewriteState.clear();
                 state->composing.clear();
                 state->preeditKeyBuffer.clear();
-                state->macroBuffer.clear();
-                state->rollbackWord.clear();
-                state->rollbackDisplay.clear();
-                state->rollbackRawBuffer.clear();
-                state->rollbackSnapshotWord.clear();
-                state->rollbackSnapshotDisplay.clear();
-                state->rollbackSnapshotRawBuffer.clear();
-                state->canReseedRollbackSnapshot = false;
-                state->noSeedNextWord = false;
                 ic->inputPanel().reset();
                 ic->updatePreedit();
                 ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
@@ -2982,12 +2558,8 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         if (!state->manualMode) {
             nextMode = RuntimeMode::BackspaceRewrite;
         } else if (state->mode == RuntimeMode::BackspaceRewrite) {
-            nextMode = RuntimeMode::SurroundingText;
-        } else if (state->mode == RuntimeMode::SurroundingText) {
             nextMode = RuntimeMode::Preedit;
         } else if (state->mode == RuntimeMode::Preedit) {
-            nextMode = RuntimeMode::DirectCommit;
-        } else if (state->mode == RuntimeMode::DirectCommit) {
             returnToAuto = true;
         } else {
             nextMode = firstManualMode();
@@ -3005,11 +2577,7 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
             state->manualMode = true;
             state->mode = nextMode;
             if (!state->program.empty()) {
-                setAppModeForProgram(
-                    ic, state->program,
-                    nextMode == RuntimeMode::SurroundingText
-                        ? RuntimeMode::Auto
-                        : nextMode);
+                setAppModeForProgram(ic, state->program, nextMode);
                 persistAppModes();
             }
         }
@@ -3044,8 +2612,6 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                 switch (m) {
                 case RuntimeMode::Auto:
                     return "Auto";
-                case RuntimeMode::SurroundingText:
-                    return "Non Preedit (Gtk Only)";
                 case RuntimeMode::Preedit:
                     return "Preedit";
                 case RuntimeMode::BackspaceRewrite:
@@ -3125,12 +2691,6 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         adapter_->setCodeTable(state->codeTable);
         if (preeditHandler_) {
             preeditHandler_->handleKey(ic, event, *state);
-        }
-        return;
-    case RuntimeMode::SurroundingText:
-        adapter_->setCodeTable(state->codeTable);
-        if (surroundingTextHandler_) {
-            surroundingTextHandler_->handleKey(ic, event, *state);
         }
         return;
     }

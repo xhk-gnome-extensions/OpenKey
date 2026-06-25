@@ -21,7 +21,6 @@ OpenKey Linux không chạy như một app riêng. Nó hoạt động theo mô h
 3. Core OpenKey xử lý Telex/VNI/Simple Telex, kiểm tra dấu, chính tả, bảng mã.
 4. Kết quả được trả lại ứng dụng theo một trong các cách sau:
 
-- `surrounding text`: sửa trực tiếp từ đang gõ nếu ứng dụng hỗ trợ tốt
 - `preedit`: hiện vùng gõ tạm, phù hợp hơn với browser/Electron
 - `NonPreedit`: không hiện preedit, dùng backspace thật rồi commit lại chữ đã sửa
 

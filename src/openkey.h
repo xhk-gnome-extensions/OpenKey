@@ -38,7 +38,6 @@ public:
 enum class RuntimeMode {
     Auto,
     BackspaceRewrite,
-    SurroundingText,
     Preedit,
     DirectCommit,
 };
@@ -115,20 +114,8 @@ struct OpenKeyState : public fcitx::InputContextProperty {
 
     std::string composing;
     std::string preeditKeyBuffer;
-    std::string lastCommitted;
-    std::string macroBuffer;
-    // For surrounding-text "direct rollback" mode: track the current word we
-    // have rewritten so we don't rely on surrounding text contents being fresh.
-    std::string rollbackWord;
-    std::string rollbackDisplay;
-    std::string rollbackRawBuffer;
-    std::string rollbackSnapshotWord;
-    std::string rollbackSnapshotDisplay;
-    std::string rollbackSnapshotRawBuffer;
-    bool canReseedRollbackSnapshot = false;
-    bool noSeedNextWord = false;
-    RuntimeMode mode = RuntimeMode::SurroundingText;
-    RuntimeMode autoMode = RuntimeMode::SurroundingText;
+    RuntimeMode mode = RuntimeMode::Preedit;
+    RuntimeMode autoMode = RuntimeMode::Preedit;
     bool manualMode = false;
     bool modeDecided = false;
     std::string program;
@@ -180,7 +167,6 @@ private:
     std::unique_ptr<FocusedAppBridge> focusedAppBridge_;
 
     std::unique_ptr<InputModeHandler> preeditHandler_;
-    std::unique_ptr<InputModeHandler> surroundingTextHandler_;
     std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
 
     bool debugEnabled() const;
