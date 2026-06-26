@@ -25,7 +25,7 @@ namespace openkey {
 struct OpenKeyState;
 class OpenKeyAdapter;
 class FocusedAppBridge;
-class RemoteNonPreeditCoordinator;
+class RemoteRewriteCoordinator;
 
 class InputModeHandler {
 public:
@@ -37,14 +37,12 @@ public:
 
 enum class RuntimeMode {
     Auto,
-    BackspaceRewriteDelta,
-    NonPreeditBackspaceRewrite,
-    SurroundingText,
+    BackspaceRewrite,
     Preedit,
     DirectCommit,
 };
 
-struct DeltaRewriteState {
+struct BackspaceRewriteState {
     std::string shownText;
     std::string rawAsciiBuffer;
     bool hasRewrittenCurrentWord = false;
@@ -53,66 +51,8 @@ struct DeltaRewriteState {
     bool processingQueue = false;
     int expectedBackspaces = 0;
     int seenBackspaces = 0;
-    std::deque<fcitx::Key> queuedKeys;
-    std::unique_ptr<fcitx::EventSourceTime> commitTimer;
-    std::unique_ptr<fcitx::EventSourceTime> ackTimeoutTimer;
-    std::string pendingConvertedText;
-    std::string pendingShownTextAfterCommit;
-    std::string backspaceSnapshotShownText;
-    std::string backspaceSnapshotRawAsciiBuffer;
-    bool backspaceSnapshotHasRewrittenCurrentWord = false;
-    bool canReseedFromBackspaceSnapshot = false;
-    bool restoredFromBackspaceSnapshot = false;
-    bool preserveBackspaceSnapshotAfterBoundaryBackspace = false;
-    bool allowBackspaceSnapshotResetPreserve = false;
-    bool allowTransientResetPreserve = false;
-
-    bool hasPendingRewrite() const {
-        return rewriteLock || waitingBackspaceAck ||
-               !pendingConvertedText.empty() ||
-               !pendingShownTextAfterCommit.empty();
-    }
-
-    void clear() {
-        if (hasPendingRewrite()) {
-            return;
-        }
-
-        shownText.clear();
-        rawAsciiBuffer.clear();
-        hasRewrittenCurrentWord = false;
-        rewriteLock = false;
-        waitingBackspaceAck = false;
-        processingQueue = false;
-        expectedBackspaces = 0;
-        seenBackspaces = 0;
-        queuedKeys.clear();
-        commitTimer.reset();
-        ackTimeoutTimer.reset();
-        pendingConvertedText.clear();
-        pendingShownTextAfterCommit.clear();
-        backspaceSnapshotShownText.clear();
-        backspaceSnapshotRawAsciiBuffer.clear();
-        backspaceSnapshotHasRewrittenCurrentWord = false;
-        canReseedFromBackspaceSnapshot = false;
-        restoredFromBackspaceSnapshot = false;
-        preserveBackspaceSnapshotAfterBoundaryBackspace = false;
-        allowBackspaceSnapshotResetPreserve = false;
-        allowTransientResetPreserve = false;
-    }
-};
-
-struct NonPreeditDeltaRewriteState {
-    std::string shownText;
-    std::string rawAsciiBuffer;
-    bool hasRewrittenCurrentWord = false;
-    bool rewriteLock = false;
-    bool waitingBackspaceAck = false;
-    bool processingNonPreedit = false;
-    int expectedBackspaces = 0;
-    int seenBackspaces = 0;
     int lateBackspaceBudget = 0;
-    std::deque<fcitx::Key> nonPreeditKeys;
+    std::deque<fcitx::Key> queuedKeys;
     std::unique_ptr<fcitx::EventSourceTime> commitTimer;
     std::unique_ptr<fcitx::EventSourceTime> lateBackspaceTimeoutTimer;
     std::unique_ptr<fcitx::EventSourceTime> ackTimeoutTimer;
@@ -145,11 +85,11 @@ struct NonPreeditDeltaRewriteState {
         hasRewrittenCurrentWord = false;
         rewriteLock = false;
         waitingBackspaceAck = false;
-        processingNonPreedit = false;
+        processingQueue = false;
         expectedBackspaces = 0;
         seenBackspaces = 0;
         lateBackspaceBudget = 0;
-        nonPreeditKeys.clear();
+        queuedKeys.clear();
         commitTimer.reset();
         lateBackspaceTimeoutTimer.reset();
         ackTimeoutTimer.reset();
@@ -169,22 +109,13 @@ struct NonPreeditDeltaRewriteState {
 };
 
 struct OpenKeyState : public fcitx::InputContextProperty {
-    DeltaRewriteState delta;
-    NonPreeditDeltaRewriteState nonPreeditDelta;
+    BackspaceRewriteState rewriteState;
     std::unique_ptr<fcitx::EventSourceTime> modeInfoTimer;
 
     std::string composing;
     std::string preeditKeyBuffer;
-    std::string lastCommitted;
-    std::string macroBuffer;
-    // For surrounding-text "direct rollback" mode: track the current word we
-    // have rewritten so we don't rely on surrounding text contents being fresh.
-    std::string rollbackWord;
-    std::string rollbackDisplay;
-    std::string rollbackRawBuffer;
-    bool noSeedNextWord = false;
-    RuntimeMode mode = RuntimeMode::SurroundingText;
-    RuntimeMode autoMode = RuntimeMode::SurroundingText;
+    RuntimeMode mode = RuntimeMode::Preedit;
+    RuntimeMode autoMode = RuntimeMode::Preedit;
     bool manualMode = false;
     bool modeDecided = false;
     std::string program;
@@ -229,16 +160,14 @@ private:
 
     // Core adapter.
     std::shared_ptr<OpenKeyAdapter> adapter_;
-    std::unique_ptr<RemoteNonPreeditCoordinator> remoteNonPreeditCoordinator_;
+    std::unique_ptr<RemoteRewriteCoordinator> remoteRewriteCoordinator_;
 
     // Optional bridge to GNOME Shell extension to resolve app id/name when
     // InputContext::program() is empty (common on Wayland for some clients).
     std::unique_ptr<FocusedAppBridge> focusedAppBridge_;
 
     std::unique_ptr<InputModeHandler> preeditHandler_;
-    std::unique_ptr<InputModeHandler> surroundingTextHandler_;
     std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
-    std::unique_ptr<InputModeHandler> nonPreeditBackspaceRewriteHandler_;
 
     bool debugEnabled() const;
     void loadAppModes();
@@ -249,20 +178,18 @@ private:
         fcitx::InputContext *ic);
     void applyConfig();
     void persistConfig();
-    bool nonPreeditServerAvailable();
+    bool rewriteServerAvailable();
 
     OpenKeyState *stateFor(fcitx::InputContext *ic);
 
     RuntimeMode decideMode(fcitx::InputContext *ic, OpenKeyState &state,
                              bool writeBack = true);
     RuntimeMode firstManualMode() const;
-    bool handleBackspaceRewrite(fcitx::InputContext *ic,
-                                fcitx::KeyEvent &event, OpenKeyState &state);
-    bool scheduleRemoteNonPreeditRewrite(fcitx::InputContext *ic, OpenKeyState &state,
+    bool scheduleRemoteRewrite(fcitx::InputContext *ic, OpenKeyState &state,
                                     unsigned int deleteCount,
                                     uint64_t interBackspaceUsec,
                                     uint64_t commitDelayUsec);
-    void handleRemoteNonPreeditDone(fcitx::InputContext *ic, uint64_t sessionId,
+    void handleRemoteRewriteDone(fcitx::InputContext *ic, uint64_t sessionId,
                                uint64_t txId);
 };
 
