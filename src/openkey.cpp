@@ -1423,16 +1423,6 @@ public:
         return false;
     }
 
-    void handleRemoteBackspaceAction(fcitx::InputContext *ic,
-                                     OpenKeyState &state) {
-        if (!deps_.backspaceInjector) {
-            return;
-        }
-        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-        deps_.backspaceInjector->sendBackspaces(
-            ic, state.program, 1, debug, 0);
-    }
-
     void handleRemoteCommitAction(fcitx::InputContext *ic, OpenKeyState &state,
                                   uint64_t txId) {
         auto &rewriteState = state.rewriteState;

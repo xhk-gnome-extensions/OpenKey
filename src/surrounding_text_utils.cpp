@@ -73,25 +73,4 @@ bool extractWordBeforeCursor(const std::string &text, unsigned int cursorChar,
     return true;
 }
 
-bool replaceRangeByCharOffset(std::string &text, unsigned int startChar,
-                              unsigned int endChar,
-                              const std::string &replacement) {
-    if (!fcitx::utf8::validate(text) || !fcitx::utf8::validate(replacement)) {
-        return false;
-    }
-    const auto total = fcitx::utf8::length(text);
-    if (startChar > endChar || endChar > total) {
-        return false;
-    }
-    const int startByte = fcitx::utf8::ncharByteLength(text.begin(), startChar);
-    const int endByte = fcitx::utf8::ncharByteLength(text.begin(), endChar);
-    if (startByte < 0 || endByte < startByte) {
-        return false;
-    }
-    text.replace(static_cast<size_t>(startByte),
-                 static_cast<size_t>(endByte - startByte), replacement);
-    return true;
-}
-
 } // namespace openkey
-

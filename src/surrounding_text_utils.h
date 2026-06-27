@@ -13,9 +13,4 @@ struct WordSegment {
 bool extractWordBeforeCursor(const std::string &text, unsigned int cursorChar,
                             WordSegment &out);
 
-bool replaceRangeByCharOffset(std::string &text, unsigned int startChar,
-                              unsigned int endChar,
-                              const std::string &replacement);
-
 } // namespace openkey
-

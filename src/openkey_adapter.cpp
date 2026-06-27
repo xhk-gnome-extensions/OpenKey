@@ -530,30 +530,4 @@ OpenKeyProcessResult OpenKeyAdapter::processAsciiKey(const std::string &currentW
     return result;
 }
 
-std::string OpenKeyAdapter::convertRawBuffer(const std::string &rawAscii) const {
-    std::string word;
-    if (rawAscii.empty()) {
-        return word;
-    }
-    // rawAscii must be plain ASCII (Telex/VNI typing sequence).
-    // We intentionally do not treat UTF-8 multibyte here.
-    for (unsigned char ch : rawAscii) {
-        if (ch < 0x20 || ch > 0x7E) {
-            // Stop at unsupported char; return best-effort.
-            break;
-        }
-        const char c = static_cast<char>(ch);
-        auto r = processAsciiKey(word, c);
-        if (r.handled) {
-            word = std::move(r.newWord);
-        } else {
-            word.push_back(c);
-        }
-    }
-    if (!fcitx::utf8::validate(word)) {
-        return {};
-    }
-    return word;
-}
-
 } // namespace openkey
